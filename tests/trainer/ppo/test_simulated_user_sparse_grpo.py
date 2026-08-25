@@ -475,9 +475,11 @@ def test_evidence_utility_is_independently_normalized_per_response_depth():
         gamma=1.0,
     )
 
-    # Depth 1 uses all three active rollout scores [-6, -4, -2].
+    # Depth 1 uses all three active rollout scores [-6, -4, -2].  Its local
+    # normalized values are [-1.2247, 0, 1.2247]; depth-2's [1, -1] return is
+    # then propagated to the earlier action in each matching trajectory.
     assert torch.allclose(
-        advantages[:, 0], torch.tensor([-1.2247448, 0.0, 1.2247448]), atol=1e-5
+        advantages[:, 0], torch.tensor([-0.2247448, -1.0, 1.2247448]), atol=1e-5
     )
     # Depth 2 contains only rows 0 and 1; row 2 is not a zero-reward sibling.
     assert torch.allclose(advantages[:2, 1], torch.tensor([1.0, -1.0]), atol=1e-5)
@@ -503,8 +505,9 @@ def test_answer_f1_is_independently_normalized_per_response_depth():
     )
 
     # Every active answer at depth 1 is a sibling; depth 2 excludes row 2.
+    # The normalized depth-2 return [1, -1] is also credited to depth 1.
     assert torch.allclose(
-        advantages[:, 0], torch.tensor([-1.1111112, -0.2020202, 1.3131313]), atol=1e-5
+        advantages[:, 0], torch.tensor([-0.1111112, -1.2020202, 1.3131313]), atol=1e-5        
     )
     assert torch.allclose(advantages[:2, 1], torch.tensor([1.0, -1.0]), atol=1e-5)
     assert advantages[2, 1] == 0.0
@@ -540,8 +543,9 @@ def test_search_efficiency_is_independently_normalized_per_response_depth():
     )
 
     # Depth 1: 0, -1, -2 -> trajectories using fewer searches are preferred.
+    # The depth-2 normalized return [1, -1] is credited to the earlier action.
     assert torch.allclose(
-        advantages[:, 0], torch.tensor([1.2247448, 0.0, -1.2247448]), atol=1e-5
+        advantages[:, 0], torch.tensor([2.2247448, -1.0, -1.2247448]), atol=1e-5
     )
     # Depth 2 only includes the first two trajectories.
     assert torch.allclose(advantages[:2, 1], torch.tensor([1.0, -1.0]), atol=1e-5)
