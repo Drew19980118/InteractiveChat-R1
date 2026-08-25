@@ -1,0 +1,333 @@
+data:
+  tokenizer: null
+  train_files: ~/data/rlhf/gsm8k/train.parquet
+  val_files: ~/data/rlhf/gsm8k/test.parquet
+  prompt_key: prompt
+  reward_fn_key: data_source
+  max_prompt_length: 512
+  max_response_length: 512
+  train_batch_size: 1024
+  val_batch_size: null
+  return_raw_input_ids: False  # This should be set to true when the tokenizer between policy and rm differs
+  return_raw_chat: False
+  shuffle: True
+  filter_overlong_prompts: False # for large-scale dataset, filtering overlong prompts could be timeconsuming. You cat set the filter_overlong_prompts_workers to use multiprocessing to speed up.
+  filter_overlong_prompts_workers: 1
+  truncation: error
+  image_key: images
+  video_key: videos
+  n_gpus_per_node: 8
+  oss_access_key_id: ""  # Set via environment variable OSS_ACCESS_KEY_ID
+  oss_access_key_secret: ""  # Set via environment variable OSS_ACCESS_KEY_SECRET
+  oss_endpoint: "" 
+  custom_train_cls:
+      path: null
+      name: null
+
+actor_rollout_ref:
+  hybrid_engine: True
+  model:
+    path: ~/models/deepseek-llm-7b-chat
+    external_lib: null
+    override_config: { }
+    enable_gradient_checkpointing: True
+    use_remove_padding: True
+  actor:
+    strategy: fsdp  # This is for backward-compatibility
+    ppo_mini_batch_size: 256
+    ppo_micro_batch_size: null # will be deprecated, use ppo_micro_batch_size_per_gpu
+    ppo_micro_batch_size_per_gpu: null
+    use_dynamic_bsz: True
+    ppo_max_token_len_per_gpu: 8192 # n * ${data.max_prompt_length} + ${data.max_response_length}
+    grad_clip: 1.0
+    # pg_losses2 = -advantages * torch.clamp(ratio, 1 - cliprange_low, 1 + cliprange_high)
+    clip_ratio: 0.2 # default value if clip_ratio_low and clip_ratio_high are not specified
+    clip_ratio_low: null #!
+    clip_ratio_high: null #!
+#     clip_ratio_c: 3.0 #! # lower bound of the value for Dual-clip PPO from https://arxiv.org/pdf/1912.09729
+    loss_agg_mode: "seq-mean-token-sum" # "token-mean" / "seq-mean-token-sum" / "seq-mean-token-mean"
+    entropy_coeff: 0.001
+    use_kl_loss: True # True for GRPO
+    use_torch_compile: True # False to disable torch compile
+    kl_loss_coef: 0.001 # for grpo
+    kl_loss_type: low_var_kl # for grpo
+    ppo_epochs: 1
+    shuffle: False
+    ulysses_sequence_parallel_size: 8 # sp size
+    checkpoint:
+      contents: ['model', 'optimizer', 'extra']  # with 'hf_model' you can save whole model as hf format, now only use sharded model checkpoint to save space
+    optim:
+      lr: 1e-6
+      lr_warmup_steps: -1 # Prioritized. Negative values mean delegating to lr_warmup_steps_ratio.
+      lr_warmup_steps_ratio: 0.  # the total steps will be injected during runtime
+      min_lr_ratio: null   # only useful for warmup with cosine
+      warmup_style: constant  # select from constant/cosine
+      total_training_steps: -1  # must be override by program
+    fsdp_config:
+      wrap_policy:
+        # transformer_layer_cls_to_wrap: None
+        min_num_params: 0
+      param_offload: False
+      optimizer_offload: False
+      fsdp_size: -1
+  ref:
+    strategy: fsdp
+    fsdp_config:
+      param_offload: False
+      wrap_policy:
+        # transformer_layer_cls_to_wrap: None
+        min_num_params: 0
+    use_torch_compile: ${actor_rollout_ref.actor.use_torch_compile}
+    log_prob_micro_batch_size: null # will be deprecated, use log_prob_micro_batch_size_per_gpu
+    log_prob_micro_batch_size_per_gpu: null
+    log_prob_use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
+    log_prob_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
+    ulysses_sequence_parallel_size: ${actor_rollout_ref.actor.ulysses_sequence_parallel_size} # sp size
+  rollout:
+    name: vllm
+    mode: sync # sync: LLM, async: AsyncLLM
+    chat_scheduler: null # async chat scheduler, e.g examples.ppo_trainer.naive_chat_scheduler.NaiveChatCompletionScheduler
+    temperature: 1.0
+    top_k: -1 # 0 for hf rollout, -1 for vllm rollout
+    top_p: 1
+    use_fire_sampling: False # https://arxiv.org/abs/2410.21236
+    prompt_length: ${data.max_prompt_length}  # not use for opensource
+    response_length: ${data.max_response_length}
+    # for vllm rollout
+    dtype: bfloat16 # should align with FSDP
+    gpu_memory_utilization: 0.5
+    ignore_eos: False
+    enforce_eager: True
+    free_cache_engine: True
+    load_format: dummy_dtensor
+    tensor_model_parallel_size: 4
+    max_num_batched_tokens: 32768
+    max_model_len: 32768
+    max_num_seqs: 1024
+    log_prob_micro_batch_size: null # will be deprecated, use log_prob_micro_batch_size_per_gpu
+    log_prob_micro_batch_size_per_gpu: null
+    log_prob_use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
+    log_prob_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
+    disable_log_stats: True
+    enable_chunked_prefill: True # may get higher throughput when set to True. When activated, Please increase max_num_batched_tokens or decrease max_model_len.
+    # for hf rollout
+    do_sample: True
+    # number of responses (i.e. num sample times)
+    n: 1 # > 1 for grpo
+    engine_kwargs: # inference engine parameters
+      swap_space: null # null means "use the engine default value" (usually 4 GB), setting it to, e.g., 32 means 32 GB
+    val_kwargs:
+      # sampling parameters for validation
+      top_k: -1 # 0 for hf rollout, -1 for vllm rollout
+      top_p: 1.0
+      temperature: 0
+      n: 1
+      do_sample: False # default eager for validation
+    multi_turn: 
+      enable: False  # should set rollout.name to sglang_async if True
+      max_turns: null  # null for no limit (default max_length // 3)
+      tool_config_path: null  # null for no tool
+      format: chatml  # chatml, more formats will be supported in the future
+
+critic:
+  rollout_n: ${actor_rollout_ref.rollout.n}
+  strategy: fsdp
+  optim:
+    lr: 1e-5
+    lr_warmup_steps_ratio: 0.  # the total steps will be injected during runtime
+    min_lr_ratio: null   # only useful for warmup with cosine
+    warmup_style: constant  # select from constant/cosine
+    total_training_steps: -1  # must be override by program
+  model:
+    path: ~/models/deepseek-llm-7b-chat
+    tokenizer_path: ${actor_rollout_ref.model.path}
+    override_config: { }
+    external_lib: ${actor_rollout_ref.model.external_lib}
+    enable_gradient_checkpointing: True
+    use_remove_padding: True
+    fsdp_config:
+      param_offload: False
+      optimizer_offload: False
+      wrap_policy:
+        # transformer_layer_cls_to_wrap: None
+        min_num_params: 0
+      fsdp_size: -1
+  ppo_mini_batch_size: ${actor_rollout_ref.actor.ppo_mini_batch_size}
+  ppo_micro_batch_size: null # will be deprecated, use ppo_micro_batch_size_per_gpu
+  ppo_micro_batch_size_per_gpu: null
+  forward_micro_batch_size: ${critic.ppo_micro_batch_size}
+  forward_micro_batch_size_per_gpu: ${critic.ppo_micro_batch_size_per_gpu}
+  use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
+  ppo_max_token_len_per_gpu: 32768 # (${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}) * 2
+  forward_max_token_len_per_gpu: ${critic.ppo_max_token_len_per_gpu}
+  ulysses_sequence_parallel_size: 4 # sp size
+  ppo_epochs: ${actor_rollout_ref.actor.ppo_epochs}
+  shuffle: ${actor_rollout_ref.actor.shuffle}
+  grad_clip: 1.0
+  cliprange_value: 0.5
+  checkpoint:
+    contents: ['model', 'optimizer', 'extra']  # with 'hf_model' you can save whole model as hf format, now only use sharded model checkpoint to save space
+
+reward_model:
+  enable: False
+  strategy: fsdp
+  model:
+    input_tokenizer: ${actor_rollout_ref.model.path}  # set this to null if the chat template is identical
+    path: ~/models/FsfairX-LLaMA3-RM-v0.1
+    external_lib: ${actor_rollout_ref.model.external_lib}
+    use_remove_padding: True
+    fsdp_config:
+      wrap_policy:
+        min_num_params: 0
+      param_offload: False
+      fsdp_size: -1
+  micro_batch_size: null # will be deprecated, use micro_batch_size_per_gpu
+  micro_batch_size_per_gpu: null # set a number
+  max_length: null
+  ulysses_sequence_parallel_size: 1 # sp size
+  use_dynamic_bsz: ${critic.use_dynamic_bsz}
+  forward_max_token_len_per_gpu: ${critic.forward_max_token_len_per_gpu}
+  train_reward_manager: naive
+  valid_reward_manager: naive
+  train_reward_type: f1
+  launch_reward_fn_async: False # custom reward function executed async on CPU, during log_prob
+
+custom_reward_function:
+  path: null
+  name: compute_score
+
+algorithm:
+  gamma: 1.0
+  lam: 1.0
+  adv_estimator: grpo
+  norm_adv_by_std_in_grpo: True
+  # Opt-in semantic grouping of intermediate IG rewards by local E5 query embeddings.
+  # Semantic mode requires info_gain_norm_mode=separate.
+  query_group_advantage: disabled  # disabled | semantic
+  query_group_similarity_threshold: 0.90
+  query_group_debug: true
+  # Rewrite-Bound IGPO: an extra first-turn reward, independent of step IG.
+  rewrite_bound_advantage: false
+
+  rewrite_bound_topk: 3
+  # Maximum number of independent queries accepted in one web_search action.
+  max_search_queries: 3
+  # Enable the nonanswer action in generation for action-labelled datasets.
+  allow_nonanswer_action: false
+  # Independent terminal action reward, enabled by action-labelled dataset wrappers only.
+  use_action_reward: false
+  # Opt-in full-dialogue simulated-user sparse GRPO. Legacy IGPO remains the default.
+  simulated_user_enabled: false
+  # ``full`` is the proposed complete reward. ``answer_f1_only`` preserves
+  # online interaction but sends only valid answer-vs-gold F1 to sparse GRPO.
+  simulated_user_reward_mode: full  # full | answer_f1_only
+  simulated_user_allow_clarify: true
+  simulated_user_mode: openai  # openai | mock (mock is smoke-test only)
+  simulated_user_base_url: null
+  simulated_user_model: null
+  simulated_user_timeout_seconds: 120
+  # Qwen32B user-simulator request budget. The simulator sees only a bounded
+  # public dialogue projection plus the current final answer: it never sees
+  # chain-of-thought, tool calls, retrieved passages, or the gold reference.
+  # ``gold_response`` and ``source_context`` caps remain accepted for launch
+  # compatibility but are deliberately not sent to the simulator.
+  simulated_user_simulator_question_token_cap: 384
+  simulated_user_simulator_gold_response_token_cap: 768
+  simulated_user_simulator_answer_token_cap: 768
+  simulated_user_simulator_transcript_token_cap: 2048
+  simulated_user_simulator_source_context_token_cap: 1024
+  simulated_user_simulator_max_output_tokens: 128
+  simulated_user_max_tool_calls: 4
+  # One query and top-3 retrieval keep each tool observation focused. The
+  # search depth itself is passed to the local tool server via IGPO_SEARCH_TOP_K.
+  simulated_user_max_search_queries: 1
+  simulated_user_search_top_k: 3
+  simulated_user_max_answer_depth: 3
+  # 0 keeps the newest retrieval's top-3 passages in full. If the policy
+  # prompt approaches its context limit, only older retrievals are converted
+  # to query/id/title records; the newest top-3 is never silently truncated.
+  simulated_user_tool_observation_token_cap: 0
+  # Pack complete dialogues to exactly data.train_batch_size original-subtask
+  # contexts before online collection. This preserves full sibling advantage
+  # groups while matching static current-context update size.
+  simulated_user_exact_context_batch: true
+  # During simulated-user validation, interpret data.val_batch_size as an
+  # upper bound on original sub-task contexts, not number of full dialogues.
+  # Every dialogue is evaluated exactly once; the final batch may be smaller.
+  simulated_user_validation_context_batching: true
+  # Optional cap used only for quick simulated-user smoke tests.  ``null``
+  # evaluates the complete validation split, which is the required setting for
+  # reported metrics.
+  simulated_user_validation_max_batches: null
+  # Optional quick validation schedule during formal simulated-user training.
+  # When the frequency is 0, no intermediate validation is performed.  The
+  # final validation is always complete and ignores this cap.
+  simulated_user_intermediate_validation_freq: 0
+  simulated_user_intermediate_validation_max_batches: 2
+  # Used only if exact batching is disabled for a tiny smoke test.
+  simulated_user_rollout_dialogue_batch_size: null
+  # Full online method controls.  The static ablation disables feedback and
+  # resets each source sub-task to its canonical gold dialogue prefix.
+  simulated_user_enable_feedback: true
+  simulated_user_static_gold_context: false
+  simulated_user_enable_evidence_utility: true
+  simulated_user_enable_search_efficiency: true
+  # Independent reward-channel weights used only by simulated-user sparse GRPO.
+  simulated_user_action_weight: 1.0
+  simulated_user_answer_f1_weight: 1.0
+  # Score the gold answer after removing the terminal policy response, leaving
+  # only prior dialogue, private search queries and retrieved passages.  This
+  # is independently normalized per dialogue/subtask/retry-depth.
+  simulated_user_evidence_utility_weight: 1.0
+  # Terminal answer reward -max(0, K - 1), where K is the number of retrievals
+  # in its sub-task. The first search is free; independently normalized per
+  # dialogue/subtask/retry-depth before this weight. Ablate 0.1 / 0.25 / 0.5.
+  simulated_user_search_efficiency_weight: 0.25
+  simulated_user_uci_weight: 1.0
+  simulated_user_clarity_weight: 1.0
+  simulated_user_patience_weight: 1.0
+  simulated_user_format_weight: 1.0
+  simulated_user_clarify_f1_weight: 1.0
+  use_kl_in_reward: False
+  kl_penalty: kl  # how to estimate kl divergence
+  kl_ctrl:
+    type: fixed
+    kl_coef: 0.001
+#     horizon: 10000 #!
+#     target_kl: 0.1 #!
+
+trainer:
+  balance_batch: False #!
+  total_epochs: 30
+  total_training_steps: null
+  project_name: verl_examples
+  experiment_name: gsm8k
+  logger: [ 'console', 'tensorboard' ]
+  log_val_generations: 0
+  rollout_data_dir: null # directory for logging the rollout data, no dump if null
+  validation_data_dir: null # directory for logging the validation data, no dump if null
+  nnodes: 1
+  n_gpus_per_node: 8
+  save_freq: -1
+  # auto: find the last ckpt to resume. If can't find, start from scratch
+  resume_mode: auto # or disable or resume_path if resume_from_path is set
+  resume_from_path: null
+  val_before_train: False
+  test_freq: -1
+  critic_warmup: 0
+  default_hdfs_dir: null
+  del_local_ckpt_after_load: False
+  default_local_dir: ./outputs/${trainer.project_name}/${trainer.experiment_name}
+  max_actor_ckpt_to_keep: null
+  max_critic_ckpt_to_keep: null
+  # The timeout for ray worker group to wait for the register center to be ready
+  ray_wait_register_center_timeout: 300
+
+ray_init:
+  num_cpus: null # `None` means using all CPUs, which might cause hang if limited in systems like SLURM. Please set to a number allowed then.
+max_turns: 10
+do_search: true
+codeact_env_disabled: true
+agent_grpo:
+  n: 16
+search_engine: online_search

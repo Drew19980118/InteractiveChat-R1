@@ -1,0 +1,26 @@
+# Data, models, indexes, and runtime artifacts are supplied/generated locally.
+data/raw/
+data/*.parquet
+data/*.jsonl
+data/*.json
+collection/
+models/
+checkpoints/
+outputs/
+eval_log/
+cache/
+logs/
+.hf-download-cache/
+
+# Python and IDE artifacts.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.idea/
+.vscode/
+
+# Large or machine-specific files.
+*.index
+*.safetensors
+*.bin
+*.pt

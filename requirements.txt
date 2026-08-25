@@ -1,0 +1,88 @@
+
+# Core ML Framework
+torch>=2.4.0
+transformers
+accelerate
+peft
+datasets
+safetensors
+einops
+
+# Ray distributed computing
+ray[default]>=2.10
+
+# vLLM inference
+vllm
+# PyTorch 2.4.0 wheels require Triton 3.0.0.
+triton==3.0.0
+
+# Data processing
+numpy
+pandas
+pyarrow>=15.0.0
+torchdata
+# TensorDict 0.6 requires PyTorch >=2.5, while this project uses PyTorch 2.4.
+tensordict==0.5.0
+
+# Configuration & logging
+hydra-core
+omegaconf
+wandb
+codetiming
+PyYAML
+pydantic
+
+# Hugging Face & Model hubs
+huggingface_hub
+modelscope
+
+# Web & API
+flask
+fastapi
+uvicorn
+starlette
+requests
+aiohttp
+openai
+
+# Web scraping & text processing
+beautifulsoup4
+html2text
+markdownify
+Pillow
+pdfminer.six
+mammoth
+python-pptx
+
+# Utilities
+tqdm
+dill
+filelock
+cloudpickle
+cachetools
+psutil
+packaging
+pathvalidate
+puremagic
+setuptools
+tomli
+Jinja2
+
+# Scientific computing
+sympy
+pylatexenc
+
+# Optional: GPU acceleration (install separately)
+# liger-kernel
+# flash-attn
+
+# Optional: Media processing
+pydub
+youtube_transcript_api
+
+# Optional: Search APIs
+serpapi
+smolagents
+
+# Optional: Testing
+# pytest

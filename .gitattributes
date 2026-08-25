@@ -1,0 +1,4 @@
+# Preserve Bash launchers in Unix format after cloning on Windows.
+*.sh text eol=lf
+*.py text eol=lf
+*.md text eol=lf

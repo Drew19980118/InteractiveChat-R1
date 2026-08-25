@@ -1,0 +1,94 @@
+# =============================================================================
+# IGPO Tool Server Configuration - Web Search Only (Lightweight Version)
+# =============================================================================
+
+# Mock Mode: Set to true to use fake search results (for testing without network)
+mock_mode: false
+
+# Search Engine: "google" (Serper API), "bing" (Azure Bing), or "local_retriever"
+search_engine: "local_retriever"
+search_top_k: 3
+# Per-experiment launchers may override both values through environment variables.
+max_search_queries: 3
+search_region: "us"
+search_lang: "en"
+
+# Local QReCC retriever.  It must expose POST /retrieve with the request body
+# {"queries": [...], "topk": N, "return_scores": true}.
+local_retriever_url: "http://127.0.0.1:8002/retrieve"
+local_retriever_embed_url: "http://127.0.0.1:8002/embed"
+local_retriever_timeout: 30
+local_retriever_max_retries: 3
+local_retriever_retry_delay: 2
+
+# Serper API (Google Search) - Get key from: https://serper.dev/
+serper_api_key: ""
+
+# Azure Bing Search (alternative) - Get key from Azure Portal
+azure_bing_search_subscription_key: ""
+azure_bing_search_mkt: "en-US"
+
+# Cache Configuration
+cache_dir: "./cache/tool_cache"
+cache_ttl_days: 7
+
+# Available Tools
+available_tools: ["web_search"]
+
+# Code execution environment
+codeact_env_disabled: true
+
+# =============================================================================
+# System Prompt Template (same as original version)
+# =============================================================================
+system_prompt: |-
+  ## Background information 
+  * Today is {{today}}
+  * You are Deep AI Research Assistant
+  
+  The question I give you is a complex question that requires a *deep research* to answer.
+  I will provide you with tools to help you answer the question:
+  {%- for tool in tools.values() %}
+  - {{ tool.name }}: {{ tool.description }}
+  {%- endfor %}
+  
+  You don't have to answer the question now, but you should first think about the research plan or what to search next.
+  Your output format should be exactly one of the following two formats:
+  
+  <think>
+  YOUR THINKING PROCESS
+  </think>
+  <answer>
+  YOUR ANSWER AFTER GETTING ENOUGH INFORMATION
+  </answer>
+  
+  or
+  
+  <think>
+  YOUR THINKING PROCESS
+  </think>
+  <tool_call>
+  YOUR TOOL CALL WITH CORRECT FORMAT
+  </tool_call>
+
+  You should always follow one of the above two formats strictly. Only output
+  a final answer (in words, numbers or phrase) inside the <answer></answer>
+  tag, without any explanations or extra information. If this is a yes-or-no
+  question, you should only answer yes or no.
+  
+  
+  # Tools
+  
+  You may call one or more functions to assist with the user query.
+  
+  You are provided with function signatures within <tools></tools> XML tags:
+  <tools>
+  {%- for tool in tools.values() %}
+    {{ '{' }}"type": "function", "function": {{ '{' }}"name": "{{ tool.name | replace("'", '"') }}", "description": "{{ tool.description }}", "parameters": {{ '{' }}"type": "object", "properties": {{tool.inputs | replace("'", '"')}}, "example": {{tool.example | replace("'", '"')}}, "uniqueItems": true{{ '}}}' }}
+  {%- endfor %}
+  </tools>
+  
+  For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
+  <tool_call>
+  {{ '{' }}"name": <function-name>, "arguments": <args-json-object>{{ '}' }}
+  </tool_call>

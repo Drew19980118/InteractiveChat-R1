@@ -1,0 +1,8 @@
+# Dependencies for scripts/local_retriever.py, installed after the locked
+# training environment is available.  Select a FAISS build compatible with
+# your NVIDIA driver/CUDA stack if this exact package is unavailable.
+faiss-gpu-cu12
+fastapi
+uvicorn
+requests
+orjson

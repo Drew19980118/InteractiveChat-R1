@@ -1,0 +1,4 @@
+# Optional semantic evaluation dependency for scripts/compute_convagent_eval_metrics.py.
+# Install in the existing IGPO conda environment with:
+#   python -m pip install -r requirements-eval-metrics.txt
+bert-score==0.3.13

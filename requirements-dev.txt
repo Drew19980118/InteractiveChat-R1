@@ -1,0 +1,3 @@
+# Lightweight verification dependencies.  The locked runtime already provides
+# PyTorch; this file is intentionally separate from training requirements.
+pytest==8.3.4
