@@ -145,36 +145,6 @@ and debugging only; training and validation do not read them.  The temporary
 `data/_hf/` directory may be retained as a download cache or removed after
 verifying that the eight Parquet files are present.
 
-### Optional: rebuild dynamic benchmarks from raw source JSON
-
-Only use this route when changing a converter or auditing raw benchmark
-sources.  Place the original, unmodified source JSON files as follows:
-
-```text
-data/raw/
-├── inscit_train.json      ├── inscit_test.json
-├── qrecc_train.json       ├── qrecc_test.json
-├── coral_train.json       ├── coral_test.json
-└── topiocqa_train.json    └── topiocqa_test.json
-```
-
-Then run:
-
-```bash
-bash scripts/prepare_all_dynamic_benchmarks.sh
-```
-
-This produces one Parquet row per complete source dialogue, for example `data/sim_user_inscit_train.parquet`.  The original dialogue, source context, answer, action label, and gold passage information are retained in `reward_model.simulated_dialogue`; no online data are generated in this conversion step.
-
-Dataset-specific handling is fixed and audited:
-
-- **InsCiT:** `directAnswer` and `noAnswerButRelevantInfo` map to `answer`; `clarification` maps to `clarify`; `noAnswerNoRelevantInfo` maps to `nonanswer`.  The script writes a canonical-label audit JSONL for any next-context mismatch.
-- **TopiOCQA:** literal `UNANSWERABLE` maps to `nonanswer`; gold passage text is retained because source IDs and local-retriever IDs may differ.
-- **QReCC:** grouped by `Conversation_no`; only `answer` actions; turns with empty `Truth_answer` are skipped and auditable.
-- **CoRAL:** grouped by `conv_id`; only `answer` actions; turns with an empty response are skipped and auditable.
-
-The converter names each audit file `<output-stem>.canonical_audit.jsonl`.  Review it before reporting results.
-
 ## 4. Set up the local retriever
 
 All rollout scripts require a local HTTP service at `http://127.0.0.1:8002/retrieve`.  Its request contract is:
