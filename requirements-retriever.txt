@@ -4,7 +4,7 @@
 # releases otherwise upgrade it transitively.  Select another FAISS build only
 # if it is compatible with CUDA 12 and NumPy 1.26.
 numpy==1.26.4
-faiss-gpu-cu12==1.14.1.post1
+faiss-gpu-cu12==1.9.0.0
 fastapi
 uvicorn
 requests
