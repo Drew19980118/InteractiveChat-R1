@@ -159,7 +159,7 @@ and each result must expose a `document` with `passage_id`, `passage_text`, and 
 
 The dynamic benchmark Parquets contain labels and dialogue state, but **not**
 the retrieval corpus or dense index.  Before any online rollout, download the
-collection that matches the experiment.  Every released collection contains:
+collection that matches the experiment.  Both released collections contain:
 
 - `part_*.parquet`: passage shards, in the exact row order used to build the
   index;
@@ -229,17 +229,21 @@ python scripts/build_qrecc_corpus.py \
 cat collection/qrecc/e5_Flat.index.part_* > collection/qrecc/e5_Flat.index
 ```
 
-#### TopiOCQA
+#### TopiOCQA and CoRAL collections
 
-Download the complete released [TopiOCQA passage collection and index](https://huggingface.co/datasets/DrewZhang/topiocqa-passages-index).
-It contains `part_001.parquet` through `part_006.parquet` and two FAISS chunks
-(`e5_Flat.index.part_aa`, `e5_Flat.index.part_ab`), totalling approximately
-86 GB before the generated JSONL corpus.
+The released collections below follow the same procedure as QReCC: download
+all passage and index chunks, build a JSONL corpus in the original shard
+order, then concatenate the binary FAISS chunks.  Do not use a corpus from one
+dataset with an index from another dataset.
+
+**TopiOCQA** — [DrewZhang/topiocqa-passages-index](https://huggingface.co/datasets/DrewZhang/topiocqa-passages-index)
+contains `part_001.parquet` through `part_006.parquet`, plus
+`e5_Flat.index.part_aa` and `e5_Flat.index.part_ab` (about 86 GB total).
 
 ```bash
 mkdir -p collection/topiocqa
 
-# Separate commands retain compatibility with older hf CLIs.
+# Separate download commands remain compatible with older hf CLIs.
 hf download DrewZhang/topiocqa-passages-index \
   --repo-type dataset \
   --include "part_*.parquet" \
@@ -259,12 +263,9 @@ python scripts/build_qrecc_corpus.py \
 cat collection/topiocqa/e5_Flat.index.part_* > collection/topiocqa/e5_Flat.index
 ```
 
-#### CoRAL
-
-Download the complete released [CoRAL passage collection and index](https://huggingface.co/datasets/DrewZhang/coral-passages-index).
-It has one passage shard (`part_001.parquet`) and one FAISS chunk
-(`e5_Flat.index.part_aa`), about 768 MB in total before the generated JSONL
-corpus.
+**CoRAL** — [DrewZhang/coral-passages-index](https://huggingface.co/datasets/DrewZhang/coral-passages-index)
+contains one passage shard (`part_001.parquet`) and one index chunk
+(`e5_Flat.index.part_aa`), about 768 MB total.
 
 ```bash
 mkdir -p collection/coral
@@ -290,8 +291,8 @@ cat collection/coral/e5_Flat.index.part_aa > collection/coral/e5_Flat.index
 
 TopiOCQA NDCG@3 uses normalized passage-text matching rather than raw passage
 IDs to accommodate differing source/retriever ID namespaces.  For every
-dataset, the FAISS index and JSONL corpus must come from the same collection
-and preserve the original passage-shard order.
+dataset, preserve original passage-shard ordering when creating the JSONL
+corpus; FAISS row IDs depend on it.
 
 Launch and test the service:
 
