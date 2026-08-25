@@ -1,29 +1,63 @@
 # InteractiveChat-R1
 
-InteractiveChat-R1 is an online, user-centric reinforcement-learning framework for conversational search.  It turns a static conversational-search benchmark into a dynamic environment in which a policy agent interacts with a frozen LLM user simulator while solving each original turn-level **sub-task**.
+> A user-centric reinforcement-learning framework for online conversational search.
 
-The released code is a self-contained research implementation built on the `verl` FSDP/vLLM training runtime.  It contains the implementation needed for data conversion, local retrieval, simulated-user rollout, sparse GRPO training, online validation, and metric calculation.  Ready-to-run **dynamic benchmark Parquet files** are released separately in the [`DrewZhang/conv`](https://huggingface.co/datasets/DrewZhang/conv) dataset repository; raw source JSON, dense indexes, and model weights are not included in this Git repository.
+InteractiveChat-R1 trains retrieval-augmented conversational agents in an
+environment where each system response changes what a user sees and may change
+what the user asks next.  It turns an annotated dialogue into a sequence of
+interactive turn-level **sub-tasks**, and optimizes both answer utility and the
+quality of the user interaction.
 
-## What is implemented
+The repository provides an end-to-end implementation built on the `verl`
+FSDP/vLLM runtime: dynamic benchmark loading, local dense retrieval,
+simulated-user rollout, sparse GRPO training, online validation, and metric
+calculation.  Ready-to-run dynamic benchmark Parquet files are released in
+[`DrewZhang/conv`](https://huggingface.co/datasets/DrewZhang/conv); model
+weights and passage collections are downloaded separately.
 
-For every dialogue, the online collector samples `n=8` policy trajectories.  A source dialogue is processed sub-task by sub-task.  The policy may issue up to four tool calls; each tool call has exactly one search query and returns top-3 passages.  A terminal action is one of `answer`, `clarify`, or `nonanswer` when supported by the dataset.
+## Method overview
 
-- **InsCiT:** `answer`, `clarify`, and `nonanswer`.
-- **TopiOCQA:** `answer` and `nonanswer`.
-- **QReCC / CoRAL:** `answer` only; the prompt never exposes `clarify` or `nonanswer`.
+1. **Online environment.** A source dialogue is processed sub-task by
+   sub-task.  The collector samples `n=8` policy trajectories per dialogue.
+2. **Retrieval-augmented interaction.** Each policy tool call emits exactly one
+   query and retrieves the top-3 passages.  A sub-task permits at most four
+   tool calls.
+3. **User feedback.** For answer-labelled sub-tasks, a frozen user simulator
+   scores the user-visible answer.  Level-2/3 feedback launches a repair turn;
+   the repair prompt requires termination with `answer`.  An invalid response
+   or action mismatch falls back to the canonical response before the next
+   source turn.
+4. **Sparse GRPO.** Reward channels are normalized among sibling rollouts at
+   the same `(dialogue, sub-task, response-depth)`, then returned only through
+   actions in that original sub-task.
 
-For an answer-labelled sub-task, a correct initial `answer` is assessed by the frozen user simulator.  A level-2/3 judgement yields concise feedback and a retry prompt that forces the policy to finish with `answer` (it may retrieve more evidence first).  A wrong action or invalid format triggers a canonical-gold fallback before the next source sub-task.
+Terminal actions are dataset-specific:
 
-The canonical reward recipe is **UCI + interactive task/user channels**:
+| Dataset | Supported terminal actions |
+|---|---|
+| InsCiT | `answer`, `clarify`, `nonanswer` |
+| TopiOCQA | `answer`, `nonanswer` |
+| QReCC / CoRAL | `answer` |
+
+The canonical objective combines **UCI** and interactive task/user channels:
 
 \[
 r = r_{\mathrm{action}} + r_{\mathrm{UCI}} + r_{\mathrm{clarity}}
     + r_{\mathrm{patience}} + r_{\mathrm{format}} + r_{\mathrm{clarify\text{-}F1}}.
 \]
 
-Each channel is independently normalized among rollouts that reached the same `(dialogue, subtask, response-depth)` group, then summed.  The terminal user-facing reward is propagated backwards only through policy actions in that same source sub-task, so prior tool-query actions receive credit without leaking reward into the next original turn.  The canonical configuration deliberately disables answer-stripped evidence utility and search-efficiency shaping.
+Here, UCI measures whether the current answer increases the probability of the
+gold answer under a frozen evaluator, conditioned on the current question,
+history, and retrieved evidence.  Clarity and patience model user
+understandability and repair burden.  Each channel is normalized independently
+within its active sibling group.  The terminal user-facing return is propagated
+only through policy actions in the same source sub-task, so retrieval queries
+receive credit without reward crossing into a future user turn.
 
-## Repository layout
+The canonical configuration disables answer-stripped evidence-utility and
+search-efficiency shaping.
+
+## Codebase
 
 ```text
 InteractiveChat-R1/
@@ -46,7 +80,9 @@ InteractiveChat-R1/
 
 `data/`, `models/`, `collection/`, `outputs/`, `eval_log/`, cache, and logs are intentionally ignored by Git.
 
-## 1. Hardware and software
+## Reproducing InteractiveChat-R1
+
+### 1. Hardware and software
 
 The supplied environment lock is designed for a clean **Linux x86_64, Python 3.10, NVIDIA H100/H200** installation with CUDA 12.1 wheels, PyTorch 2.4.0, vLLM 0.6.3, Ray 2.10.0, Transformers 4.49.0, and FlashAttention 2.5.8.  An NVIDIA driver at least `525.60.13` is required.
 
@@ -60,11 +96,22 @@ The recommended single-node layout has eight H100 80GB GPUs:
 
 Two policy GPUs are supported by setting `N_GPUS=2` and `ULYSSES_SEQUENCE_PARALLEL_SIZE=2`; keep the same global batch and reduce only `ROLLOUT_GPU_MEMORY_UTILIZATION` if necessary.  The 7B launchers use a conservative `0.04` vLLM cache fraction by default.  This does not change the 8192-token model context window or the optimization recipe.
 
-### Create the locked environment from scratch
+On a four-H200 node, co-locate the retriever and simulator on GPUs `0,1`, and
+use GPUs `2,3` for policy training and validation:
 
-The commands below are the supported public-repository path.  They assume no
-previous IGPO checkout, Conda environment, model directory, or retriever
-service.  Do not substitute an old project's environment in these instructions.
+```bash
+export CUDA_VISIBLE_DEVICES=2,3
+export N_GPUS=2
+export ULYSSES_SEQUENCE_PARALLEL_SIZE=2
+export ROLLOUT_GPU_MEMORY_UTILIZATION=0.08
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# Run any training or validation launcher below in this shell.
+```
+
+### 2. Create the locked environment
+
+The commands below create a clean, reproducible installation with its own
+Conda environment, model directory, and local services.
 
 ```bash
 git clone https://github.com/Drew19980118/InteractiveChat-R1.git InteractiveChat-R1
@@ -78,7 +125,7 @@ python -m pip install -r requirements-dev.txt
 python -m pip check
 ```
 
-Do **not** install the broad `requirements.txt` into this environment: it can replace the locked PyTorch/vLLM runtime.  `flash-attn` is compiled by the installer, so set `MAX_JOBS` if the login node has a restrictive CPU quota.  The `faiss-gpu-cu12==1.9.0.0` package in `requirements-retriever.txt` is intentionally separate because the exact FAISS wheel must be compatible with the host driver/CUDA stack; this release supports Hopper and pins NumPy below 2, which is required by vLLM 0.6.3.  W&B logging and the legacy web-agent browser are optional and can be installed, if needed, with `python -m pip install -e '.[tracking,web-agent]'`.
+Do **not** install the broad `requirements.txt` into this environment: it can replace the locked PyTorch/vLLM runtime.  `flash-attn` is compiled by the installer, so set `MAX_JOBS` if the login node has a restrictive CPU quota.  The `faiss-gpu-cu12==1.9.0.0` package in `requirements-retriever.txt` is intentionally separate because the exact FAISS wheel must be compatible with the host driver/CUDA stack; this release supports Hopper and pins NumPy below 2, which is required by vLLM 0.6.3.  Optional tracking and browser-agent dependencies can be installed with `python -m pip install -e '.[tracking,web-agent]'`.
 
 Quick import test:
 
@@ -86,7 +133,7 @@ Quick import test:
 python -m pytest -q tests/trainer/ppo/test_simulated_user_sparse_grpo.py
 ```
 
-## 2. Download the policy and simulator models
+### 3. Download policy and simulator checkpoints
 
 The default scripts assume the following local layout; all paths can be overridden with environment variables.
 
@@ -100,7 +147,7 @@ hf download Qwen/Qwen2.5-32B-Instruct --local-dir models/Qwen2.5-32B-Instruct
 
 The 32B checkpoint is frozen and used only as the user simulator.  The 3B or 7B checkpoint is both the actor initialization and the reference/critic model path required by the FSDP runner.
 
-## 3. Download the released dynamic benchmarks
+### 4. Download prepared dynamic benchmarks
 
 The recommended path is to download the exact prepared dynamic benchmarks used
 by the provided launchers.  They are public in
@@ -145,7 +192,7 @@ and debugging only; training and validation do not read them.  The temporary
 `data/_hf/` directory may be retained as a download cache or removed after
 verifying that the eight Parquet files are present.
 
-## 4. Set up the local retriever
+### 5. Set up the local retriever
 
 All rollout scripts require a local HTTP service at `http://127.0.0.1:8002/retrieve`.  Its request contract is:
 
@@ -155,11 +202,11 @@ All rollout scripts require a local HTTP service at `http://127.0.0.1:8002/retri
 
 and each result must expose a `document` with `passage_id`, `passage_text`, and optional `title`.  The project includes a compatible FAISS server at `scripts/local_retriever.py`.
 
-### Download the released passage collections and FAISS indexes
+#### Download passage collections and FAISS indexes
 
 The dynamic benchmark Parquets contain labels and dialogue state, but **not**
 the retrieval corpus or dense index.  Before any online rollout, download the
-collection that matches the experiment.  Both released collections contain:
+collection that matches the experiment.  Every released collection contains:
 
 - `part_*.parquet`: passage shards, in the exact row order used to build the
   index;
@@ -314,7 +361,7 @@ python scripts/test_local_retriever.py --topk 3 \
 
 The readiness check in every training/validation launcher deliberately uses `return_scores=true`; do not change the retriever to return a different response shape.
 
-## 5. Launch the frozen user simulator
+### 6. Launch the frozen user simulator
 
 The policy’s private thought/tool/evidence trace is never sent to the simulator.  The simulator receives only the current sub-task, its permitted source context, and the user-visible `<answer>` content; it returns structured level 1/2/3 feedback.
 
@@ -337,7 +384,9 @@ curl http://127.0.0.1:8010/v1/models
 
 The expected model ID is `qwen32b-user-simulator`.  If port 8010 is occupied, either stop the process that owns that port or set `SIMULATOR_PORT=<free-port>` and use the same port in `USER_SIMULATOR_BASE_URL` below.  Never stop the retriever on port 8002 when fixing the simulator.
 
-## 6. Canonical training configuration
+## Training
+
+### Canonical configuration
 
 All provided UCI training launchers use exactly the current formal setting:
 
@@ -358,9 +407,10 @@ All provided UCI training launchers use exactly the current formal setting:
 
 `EXACT_CONTEXT_BATCH=true` packs complete dialogues so that exactly 128 original sub-task contexts contribute to each update, without splitting a dialogue when calculating sibling advantages.  The collected trajectory count is therefore `128 × 8 = 1024` rollout rows per update.
 
-### InsCiT 3B: train and final online validation
+### InsCiT: train and final online validation
 
 ```bash
+# Qwen2.5-3B
 CUDA_VISIBLE_DEVICES=4,5,6,7 \
 N_GPUS=4 ULYSSES_SEQUENCE_PARALLEL_SIZE=4 \
 USER_SIMULATOR_BASE_URL=http://127.0.0.1:8010 \
@@ -369,9 +419,8 @@ INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
 bash scripts/run_inscit_3b_uci_train.sh
 ```
 
-### InsCiT 7B
-
 ```bash
+# Qwen2.5-7B
 CUDA_VISIBLE_DEVICES=4,5,6,7 \
 N_GPUS=4 ULYSSES_SEQUENCE_PARALLEL_SIZE=4 \
 USER_SIMULATOR_BASE_URL=http://127.0.0.1:8010 \
@@ -380,25 +429,34 @@ INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
 bash scripts/run_inscit_7b_uci_train.sh
 ```
 
-### QReCC 3B / 7B
-
-Replace the final script name with the required model scale:
+### QReCC: train and final online validation
 
 ```bash
+# Qwen2.5-3B
 CUDA_VISIBLE_DEVICES=4,5,6,7 \
 N_GPUS=4 ULYSSES_SEQUENCE_PARALLEL_SIZE=4 \
 USER_SIMULATOR_BASE_URL=http://127.0.0.1:8010 \
 USER_SIMULATOR_MODEL=qwen32b-user-simulator \
 INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
 bash scripts/run_qrecc_3b_uci_train.sh
+```
 
-# Qwen2.5-7B:
-# bash scripts/run_qrecc_7b_uci_train.sh
+```bash
+# Qwen2.5-7B
+CUDA_VISIBLE_DEVICES=4,5,6,7 \
+N_GPUS=4 ULYSSES_SEQUENCE_PARALLEL_SIZE=4 \
+USER_SIMULATOR_BASE_URL=http://127.0.0.1:8010 \
+USER_SIMULATOR_MODEL=qwen32b-user-simulator \
+INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
+bash scripts/run_qrecc_7b_uci_train.sh
 ```
 
 Each run automatically performs the full online test after the final step and then computes F1, BERTScore, NDCG@3, action accuracy (where applicable), format success rate, user satisfaction, simulator fallback rate, mean retry depth, and mean tool calls.
 
-For a controlled UCI ablation that preserves all other interactive reward channels but replaces UCI with token-set answer F1:
+### Controlled ablations
+
+The UCI-to-answer-F1 study preserves all other interactive reward channels and
+replaces UCI with token-set answer F1:
 
 ```bash
 CUDA_VISIBLE_DEVICES=4,5,6,7 N_GPUS=4 ULYSSES_SEQUENCE_PARALLEL_SIZE=4 \
@@ -407,9 +465,9 @@ USER_SIMULATOR_MODEL=qwen32b-user-simulator \
 bash scripts/run_inscit_3b_uci_to_f1_train.sh
 ```
 
-For the static-context/no-feedback ablation, every sub-task starts from the
-source dataset's gold dialogue prefix; no simulator feedback or retry is used.
-It retains action, UCI, format, and clarification-F1 rewards:
+The static-context/no-feedback study starts every sub-task from the canonical
+dialogue prefix and uses no simulator feedback or retry.  It retains action,
+UCI, format, and clarification-F1 rewards:
 
 ```bash
 CUDA_VISIBLE_DEVICES=4,5,6,7 N_GPUS=4 ULYSSES_SEQUENCE_PARALLEL_SIZE=4 \
@@ -433,7 +491,7 @@ TOTAL_STEPS=15 \
 bash scripts/run_inscit_3b_uci_train.sh
 ```
 
-## 7. Online validation / transfer evaluation
+## Online evaluation
 
 All validation launchers run the same interactive environment: the simulator can give feedback, policy history contains its own previous answers or canonical fallback responses, and top-3 retrieval happens at every valid tool call.  They write complete per-subtask online traces to `eval_log/`.
 
@@ -457,7 +515,7 @@ Available launchers:
 | QReCC 3B | `run_qrecc_3b_uci_val.sh` | `run_coral_from_qrecc_3b_uci_val.sh` |
 | QReCC 7B | `run_qrecc_7b_uci_val.sh` | `run_coral_from_qrecc_7b_uci_val.sh` |
 
-## 8. Outputs and metrics
+## Outputs and metrics
 
 For experiment `<name>` and data source `<dataset>`:
 
