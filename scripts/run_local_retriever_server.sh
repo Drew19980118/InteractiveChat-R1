@@ -9,7 +9,7 @@ cd "$PROJECT_ROOT"
 : "${RETRIEVER_INDEX_PATH:?Set the merged FAISS index path.}"
 : "${RETRIEVER_CORPUS_PATH:?Set the JSONL corpus path aligned to the FAISS ids.}"
 
-INTERACTIVECHAT_CONDA_ENV="${INTERACTIVECHAT_CONDA_ENV:-${IGPO_CONDA_ENV:-interactivechat-r1}}"
+INTERACTIVECHAT_CONDA_ENV="${INTERACTIVECHAT_CONDA_ENV:-interactivechat-r1}"
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$INTERACTIVECHAT_CONDA_ENV"
 

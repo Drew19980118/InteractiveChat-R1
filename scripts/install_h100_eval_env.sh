@@ -9,10 +9,15 @@ set -euo pipefail
 ENV_NAME="${1:-interactivechat-r1}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOCK_FILE="${REPO_ROOT}/requirements-eval-h100-cu121.txt"
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,4,6}"
 MAX_JOBS="${MAX_JOBS:-4}"
-export CUDA_VISIBLE_DEVICES
 export MAX_JOBS
+
+# Do not impose a machine-specific GPU list.  A caller may set
+# CUDA_VISIBLE_DEVICES before invoking the installer, otherwise the PyTorch
+# check sees every GPU visible to the current shell.
+if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+    export CUDA_VISIBLE_DEVICES
+fi
 
 fail() {
     echo "ERROR: $*" >&2
@@ -128,4 +133,8 @@ PY
 
 echo
 echo "Environment '${ENV_NAME}' is ready. Activate it with: conda activate ${ENV_NAME}"
-echo "The evaluation default uses CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}."
+if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+    echo "The environment check used CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}."
+else
+    echo "The environment check used all GPUs visible to this shell."
+fi

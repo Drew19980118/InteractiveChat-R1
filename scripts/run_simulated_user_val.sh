@@ -28,8 +28,7 @@ case "$DATASET" in
     ;;
 esac
 
-# Keep IGPO_CONDA_ENV as a backwards-compatible alias for earlier runs.
-INTERACTIVECHAT_CONDA_ENV="${INTERACTIVECHAT_CONDA_ENV:-${IGPO_CONDA_ENV:-interactivechat-r1}}"
+INTERACTIVECHAT_CONDA_ENV="${INTERACTIVECHAT_CONDA_ENV:-interactivechat-r1}"
 N_GPUS="${N_GPUS:-4}"
 ULYSSES_SEQUENCE_PARALLEL_SIZE="${ULYSSES_SEQUENCE_PARALLEL_SIZE:-$N_GPUS}"
 # In FSDP-resume mode this must be the source training parquet because the

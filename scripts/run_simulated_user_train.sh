@@ -27,9 +27,7 @@ case "$DATASET" in
     ;;
 esac
 
-# ``IGPO_CONDA_ENV`` remains accepted so existing experiment commands keep
-# working after migration.  New users should set INTERACTIVECHAT_CONDA_ENV.
-INTERACTIVECHAT_CONDA_ENV="${INTERACTIVECHAT_CONDA_ENV:-${IGPO_CONDA_ENV:-interactivechat-r1}}"
+INTERACTIVECHAT_CONDA_ENV="${INTERACTIVECHAT_CONDA_ENV:-interactivechat-r1}"
 N_GPUS="${N_GPUS:-4}"
 ULYSSES_SEQUENCE_PARALLEL_SIZE="${ULYSSES_SEQUENCE_PARALLEL_SIZE:-$N_GPUS}"
 TRAIN_FILE="${TRAIN_FILE:-$PROJECT_ROOT/data/sim_user_${DATASET}_train.parquet}"

@@ -48,7 +48,7 @@ InteractiveChat-R1/
 
 ## 1. Hardware and software
 
-The supplied environment lock is tested on **Linux x86_64, Python 3.10, NVIDIA H100, CUDA 12.1 wheels**, with PyTorch 2.4.0, vLLM 0.6.3, Ray 2.10.0, Transformers 4.49.0, and FlashAttention 2.5.8.  An NVIDIA driver at least `525.60.13` is required.
+The supplied environment lock is designed for a clean **Linux x86_64, Python 3.10, NVIDIA H100/H200** installation with CUDA 12.1 wheels, PyTorch 2.4.0, vLLM 0.6.3, Ray 2.10.0, Transformers 4.49.0, and FlashAttention 2.5.8.  An NVIDIA driver at least `525.60.13` is required.
 
 The recommended single-node layout has eight H100 80GB GPUs:
 
@@ -60,20 +60,25 @@ The recommended single-node layout has eight H100 80GB GPUs:
 
 Two policy GPUs are supported by setting `N_GPUS=2` and `ULYSSES_SEQUENCE_PARALLEL_SIZE=2`; keep the same global batch and reduce only `ROLLOUT_GPU_MEMORY_UTILIZATION` if necessary.  The 7B launchers use a conservative `0.04` vLLM cache fraction by default.  This does not change the 8192-token model context window or the optimization recipe.
 
-### Create the locked environment
+### Create the locked environment from scratch
+
+The commands below are the supported public-repository path.  They assume no
+previous IGPO checkout, Conda environment, model directory, or retriever
+service.  Do not substitute an old project's environment in these instructions.
 
 ```bash
 git clone <YOUR_INTERACTIVECHAT_R1_REPOSITORY_URL> InteractiveChat-R1
 cd InteractiveChat-R1
 
-bash scripts/install_h100_eval_env.sh interactivechat-r1
+MAX_JOBS=4 bash scripts/install_h100_eval_env.sh interactivechat-r1
 conda activate interactivechat-r1
 python -m pip install -r requirements-eval-metrics.txt
 python -m pip install -r requirements-retriever.txt
 python -m pip install -r requirements-dev.txt
+python -m pip check
 ```
 
-Do **not** install the broad `requirements.txt` into this environment: it can replace the locked PyTorch/vLLM runtime.  `flash-attn` is compiled by the installer, so set `MAX_JOBS` if the login node has a restrictive CPU quota.
+Do **not** install the broad `requirements.txt` into this environment: it can replace the locked PyTorch/vLLM runtime.  `flash-attn` is compiled by the installer, so set `MAX_JOBS` if the login node has a restrictive CPU quota.  The `faiss-gpu-cu12` package in `requirements-retriever.txt` is intentionally separate because the exact FAISS wheel must be compatible with the host driver/CUDA stack.
 
 Quick import test:
 
