@@ -155,40 +155,95 @@ All rollout scripts require a local HTTP service at `http://127.0.0.1:8002/retri
 
 and each result must expose a `document` with `passage_id`, `passage_text`, and optional `title`.  The project includes a compatible FAISS server at `scripts/local_retriever.py`.
 
-### Prepare a QReCC FAISS collection (optional helper)
+### Download the released passage collections and FAISS indexes
 
-The original QReCC corpus/index is large (about 210GB); it is not committed.  The helper downloads it outside the training environment:
+The dynamic benchmark Parquets contain labels and dialogue state, but **not**
+the retrieval corpus or dense index.  Before any online rollout, download the
+collection that matches the experiment.  Both released collections contain:
+
+- `part_*.parquet`: passage shards, in the exact row order used to build the
+  index;
+- `e5_Flat.index.part_*`: binary chunks of one FAISS index.
+
+The local retriever requires the reassembled index and a JSONL corpus created
+from the same, complete set of passage shards.  Do not mix files across
+repositories or reorder the shards.
+
+#### InsCiT
+
+Download the complete released [InsCiT passage collection and index](https://huggingface.co/datasets/DrewZhang/inscit-passages-index).
+It is approximately 159 GB before the generated JSONL corpus, so reserve at
+least 250 GB of free local storage.
+
+```bash
+mkdir -p collection/inscit
+
+# Use one command per pattern so older hf CLIs do not discard an earlier
+# --include option.  The first command downloads every InsCiT passage shard;
+# the second downloads every FAISS binary chunk (part_aa through part_an).
+hf download DrewZhang/inscit-passages-index \
+  --repo-type dataset \
+  --include "part_*.parquet" \
+  --local-dir collection/inscit \
+  --max-workers 8
+
+hf download DrewZhang/inscit-passages-index \
+  --repo-type dataset \
+  --include "e5_Flat.index.part_*" \
+  --local-dir collection/inscit \
+  --max-workers 8
+
+# The existing converter is row-order preserving.  Give an explicit output
+# name because the same utility is also used for QReCC.
+python scripts/build_qrecc_corpus.py \
+  --collection-dir collection/inscit \
+  --output collection/inscit/inscit_index.jsonl
+
+# Concatenate chunks in lexical order: aa, ab, ..., an.
+cat collection/inscit/e5_Flat.index.part_* > collection/inscit/e5_Flat.index
+```
+
+#### QReCC
+
+Download the complete released [QReCC passage collection and index](https://huggingface.co/datasets/DrewZhang/qrecc-passages-index).
+It contains exactly `part_001.parquet` through `part_050.parquet`, together
+with `e5_Flat.index.part_aa` through `e5_Flat.index.part_ad` (about 210 GB in
+total before the generated JSONL).  The supplied resumable helper uses an
+isolated download environment and checks the expected 50 passage shards and
+four index shards:
 
 ```bash
 tmux new -s qrecc-download
+cd /path/to/InteractiveChat-R1
 bash scripts/download_qrecc_index.sh
 ```
 
-The retriever needs a **single** FAISS file plus a JSONL corpus aligned with its row IDs.  After downloading, create the corpus with the existing converter and concatenate index shards only if the source archive stores them as binary pieces:
+After the helper completes, build the aligned corpus and reassemble the
+index:
 
 ```bash
-# Creates collection/qrecc/qrecc_index.jsonl from part_*.parquet without
-# downloading anything again.
-python scripts/build_qrecc_corpus.py --collection-dir collection/qrecc
+python scripts/build_qrecc_corpus.py \
+  --collection-dir collection/qrecc \
+  --output collection/qrecc/qrecc_index.jsonl
 
-# If the downloaded repository contains e5_Flat.index.part_{aa,ab,ac,ad},
-# assemble its binary index once.
-cat collection/qrecc/e5_Flat.index.part_aa \
-    collection/qrecc/e5_Flat.index.part_ab \
-    collection/qrecc/e5_Flat.index.part_ac \
-    collection/qrecc/e5_Flat.index.part_ad \
-    > collection/qrecc/e5_Flat.index
+cat collection/qrecc/e5_Flat.index.part_* > collection/qrecc/e5_Flat.index
 ```
 
-For InsCiT, TopiOCQA, and CoRAL, point the server to the **same retrieval collection used by your experiment**.  The important requirement is that the corpus covers the benchmark’s evidence passages and the FAISS index and JSONL corpus have identical row order.  TopiOCQA NDCG@3 uses normalized passage-text matching rather than raw passage IDs to accommodate differing source/retriever ID namespaces.
+For TopiOCQA and CoRAL, use the retrieval collection chosen for that
+experiment; it must cover their gold evidence and preserve FAISS/corpus row
+alignment.  TopiOCQA NDCG@3 uses normalized passage-text matching rather than
+raw passage IDs to accommodate differing source/retriever ID namespaces.
 
 Launch and test the service:
 
 ```bash
 mkdir -p logs
+# For InsCiT training, use collection/inscit/e5_Flat.index and
+# collection/inscit/inscit_index.jsonl.  Replace both paths together for
+# QReCC or another aligned collection.
 CUDA_VISIBLE_DEVICES=0,1 \
-RETRIEVER_INDEX_PATH=$PWD/collection/qrecc/e5_Flat.index \
-RETRIEVER_CORPUS_PATH=$PWD/collection/qrecc/qrecc_index.jsonl \
+RETRIEVER_INDEX_PATH=$PWD/collection/inscit/e5_Flat.index \
+RETRIEVER_CORPUS_PATH=$PWD/collection/inscit/inscit_index.jsonl \
 RETRIEVER_MODEL_PATH=intfloat/e5-base-v2 \
 bash scripts/run_local_retriever_server.sh \
   > logs/retriever.log 2>&1 &
