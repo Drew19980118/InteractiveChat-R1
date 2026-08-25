@@ -2,7 +2,7 @@
 
 InteractiveChat-R1 is an online, user-centric reinforcement-learning framework for conversational search.  It turns a static conversational-search benchmark into a dynamic environment in which a policy agent interacts with a frozen LLM user simulator while solving each original turn-level **sub-task**.
 
-The released code is a self-contained research implementation built on the `verl` FSDP/vLLM training runtime.  It contains the implementation needed for data conversion, local retrieval, simulated-user rollout, sparse GRPO training, online validation, and metric calculation.  It does **not** distribute benchmark data, dense indexes, or model weights.
+The released code is a self-contained research implementation built on the `verl` FSDP/vLLM training runtime.  It contains the implementation needed for data conversion, local retrieval, simulated-user rollout, sparse GRPO training, online validation, and metric calculation.  Ready-to-run **dynamic benchmark Parquet files** are released separately in the [`DrewZhang/conv`](https://huggingface.co/datasets/DrewZhang/conv) dataset repository; raw source JSON, dense indexes, and model weights are not included in this Git repository.
 
 ## What is implemented
 
@@ -37,7 +37,7 @@ InteractiveChat-R1/
 │   ├── run_{inscit,qrecc}_{3b,7b}_uci_val.sh
 │   ├── run_topiocqa_from_inscit_*_uci_val.sh
 │   └── run_coral_from_qrecc_*_uci_val.sh
-├── data/                         # create locally; raw JSON and converted Parquet
+├── data/                         # create locally; downloaded dynamic benchmark Parquet
 ├── models/                       # create locally; Qwen checkpoints
 ├── collection/                   # create locally; corpus and FAISS index
 ├── outputs/                      # generated FSDP checkpoints
@@ -100,9 +100,55 @@ hf download Qwen/Qwen2.5-32B-Instruct --local-dir models/Qwen2.5-32B-Instruct
 
 The 32B checkpoint is frozen and used only as the user simulator.  The 3B or 7B checkpoint is both the actor initialization and the reference/critic model path required by the FSDP runner.
 
-## 3. Convert static benchmarks into dynamic environments
+## 3. Download the released dynamic benchmarks
 
-Place the original, unmodified source JSON files as follows:
+The recommended path is to download the exact prepared dynamic benchmarks used
+by the provided launchers.  They are public in
+[`DrewZhang/conv/InteractiveChat-R1`](https://huggingface.co/datasets/DrewZhang/conv/tree/main/InteractiveChat-R1).
+This avoids rebuilding labels from raw sources and guarantees that all
+canonical-label decisions match the released experiments.
+
+```bash
+# No login is required for this public dataset repository.
+mkdir -p data/_hf
+
+# Use separate commands for compatibility with both recent and older hf CLIs.
+hf download DrewZhang/conv \
+  --repo-type dataset \
+  --include "InteractiveChat-R1/sim_user_*.parquet" \
+  --local-dir data/_hf
+
+hf download DrewZhang/conv \
+  --repo-type dataset \
+  --include "InteractiveChat-R1/sim_user_*.canonical_audit.jsonl" \
+  --local-dir data/_hf
+
+# The Hub preserves the repository directory under --local-dir; flatten only
+# the released dynamic data files into the project data directory.
+mv data/_hf/InteractiveChat-R1/sim_user_* data/
+
+ls -lh data/sim_user_*.parquet
+```
+
+The launchers directly consume the eight files below:
+
+```text
+data/
+├── sim_user_inscit_train.parquet      ├── sim_user_inscit_test.parquet
+├── sim_user_qrecc_train.parquet       ├── sim_user_qrecc_test.parquet
+├── sim_user_coral_train.parquet       ├── sim_user_coral_test.parquet
+├── sim_user_topiocqa_train.parquet    └── sim_user_topiocqa_test.parquet
+```
+
+The accompanying `*.canonical_audit.jsonl` files are included for provenance
+and debugging only; training and validation do not read them.  The temporary
+`data/_hf/` directory may be retained as a download cache or removed after
+verifying that the eight Parquet files are present.
+
+### Optional: rebuild dynamic benchmarks from raw source JSON
+
+Only use this route when changing a converter or auditing raw benchmark
+sources.  Place the original, unmodified source JSON files as follows:
 
 ```text
 data/raw/
