@@ -37,8 +37,6 @@ install_requires = [
     "tensordict==0.5.0",
     "torchdata",
     "transformers",
-    "wandb",
-    "smolagents",
     "vllm",
     "triton==3.0.0",
     "torch==2.4.0+cu121"
@@ -54,11 +52,16 @@ extras_require = {
   'prime': PRIME_REQUIRES,
   'geo': GEO_REQUIRES,
   'gpu': GPU_REQUIRES,
+  # InteractiveChat-R1 uses the console logger and the local retriever.  These
+  # legacy VERL integrations remain available without making a clean runtime
+  # resolve their broad, potentially version-changing dependency trees.
+  'tracking': ['wandb'],
+  'web-agent': ['smolagents'],
 }
 
 from pathlib import Path
 this_directory = Path(__file__).parent
-long_description = (this_directory / "README.md").read_text()
+long_description = (this_directory / "README.md").read_text(encoding="utf-8")
 
 setup(
     name='interactivechat-r1',

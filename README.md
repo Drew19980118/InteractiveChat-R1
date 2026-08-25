@@ -78,7 +78,7 @@ python -m pip install -r requirements-dev.txt
 python -m pip check
 ```
 
-Do **not** install the broad `requirements.txt` into this environment: it can replace the locked PyTorch/vLLM runtime.  `flash-attn` is compiled by the installer, so set `MAX_JOBS` if the login node has a restrictive CPU quota.  The `faiss-gpu-cu12` package in `requirements-retriever.txt` is intentionally separate because the exact FAISS wheel must be compatible with the host driver/CUDA stack.
+Do **not** install the broad `requirements.txt` into this environment: it can replace the locked PyTorch/vLLM runtime.  `flash-attn` is compiled by the installer, so set `MAX_JOBS` if the login node has a restrictive CPU quota.  The `faiss-gpu-cu12` package in `requirements-retriever.txt` is intentionally separate because the exact FAISS wheel must be compatible with the host driver/CUDA stack.  W&B logging and the legacy web-agent browser are optional and can be installed, if needed, with `python -m pip install -e '.[tracking,web-agent]'`.
 
 Quick import test:
 

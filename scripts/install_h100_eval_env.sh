@@ -114,15 +114,18 @@ from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input
 print("flash-attn import: OK")
 PY
 
-echo "Checking the locked runtime before installing the repository..."
-python -m pip check
-
 # Do NOT run `pip install -r requirements.txt` in this environment. That file
 # is intentionally broad and may upgrade torch/vLLM. The lock file above
-# includes every dependency used by evaluate.sh; optional packages such as
-# wandb, modelscope, and smolagents are not needed for console-only evaluation.
-echo "Installing the repository without resolving its broad package metadata..."
+# includes every dependency needed by the InteractiveChat-R1 console-training
+# path.  Legacy W&B and web-agent integrations are optional setup extras.
+echo "Installing the repository without resolving optional package metadata..."
 python -m pip install --editable "${REPO_ROOT}" --no-deps
+
+# Install the editable package before pip check.  This refreshes metadata from
+# a previous partial install and makes the check cover only the locked runtime
+# dependencies required by this project.
+echo "Checking the locked InteractiveChat-R1 runtime..."
+python -m pip check
 python - <<'PY'
 from codetiming import Timer
 from tools_server.util import MessageClient
