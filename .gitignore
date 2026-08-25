@@ -1,16 +1,16 @@
 # Data, models, indexes, and runtime artifacts are supplied/generated locally.
-data/raw/
-data/*.parquet
-data/*.jsonl
-data/*.json
-collection/
-models/
-checkpoints/
-outputs/
-eval_log/
-cache/
-logs/
-.hf-download-cache/
+/data/raw/
+/data/*.parquet
+/data/*.jsonl
+/data/*.json
+/collection/
+/models/
+/checkpoints/
+/outputs/
+/eval_log/
+/cache/
+/logs/
+/.hf-download-cache/
 
 # Python and IDE artifacts.
 __pycache__/
