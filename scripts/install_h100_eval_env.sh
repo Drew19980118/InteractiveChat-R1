@@ -9,7 +9,7 @@ set -euo pipefail
 ENV_NAME="${1:-interactivechat-r1}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOCK_FILE="${REPO_ROOT}/requirements-eval-h100-cu121.txt"
-MAX_JOBS="${MAX_JOBS:-4}"
+MAX_JOBS="${MAX_JOBS:-8}"
 export MAX_JOBS
 
 # Do not impose a machine-specific GPU list.  A caller may set

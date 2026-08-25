@@ -67,10 +67,10 @@ previous IGPO checkout, Conda environment, model directory, or retriever
 service.  Do not substitute an old project's environment in these instructions.
 
 ```bash
-git clone <YOUR_INTERACTIVECHAT_R1_REPOSITORY_URL> InteractiveChat-R1
+git clone https://github.com/Drew19980118/InteractiveChat-R1.git InteractiveChat-R1
 cd InteractiveChat-R1
 
-MAX_JOBS=4 bash scripts/install_h100_eval_env.sh interactivechat-r1
+MAX_JOBS=8 bash scripts/install_h100_eval_env.sh interactivechat-r1
 conda activate interactivechat-r1
 python -m pip install -r requirements-eval-metrics.txt
 python -m pip install -r requirements-retriever.txt
