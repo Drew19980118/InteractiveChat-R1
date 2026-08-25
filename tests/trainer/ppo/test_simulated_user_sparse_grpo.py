@@ -507,7 +507,9 @@ def test_answer_f1_is_independently_normalized_per_response_depth():
     # Every active answer at depth 1 is a sibling; depth 2 excludes row 2.
     # The normalized depth-2 return [1, -1] is also credited to depth 1.
     assert torch.allclose(
-        advantages[:, 0], torch.tensor([-0.1111112, -1.2020202, 1.3131313]), atol=1e-5        
+        # Includes the implementation's float32 normalization with
+        # ``sqrt(variance + 1e-8) + 1e-6`` at both response depths.
+        advantages[:, 0], torch.tensor([-0.1111677, -1.2020265, 1.3131942]), atol=1e-5
     )
     assert torch.allclose(advantages[:2, 1], torch.tensor([1.0, -1.0]), atol=1e-5)
     assert advantages[2, 1] == 0.0
