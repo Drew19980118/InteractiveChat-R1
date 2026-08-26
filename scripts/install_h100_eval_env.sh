@@ -64,6 +64,16 @@ grep -v '^flash-attn==' "${LOCK_FILE}" > "${core_requirements}"
 echo "Installing the locked PyTorch/vLLM runtime..."
 python -m pip install --requirement "${core_requirements}"
 
+# A partially created Conda environment can retain package metadata while the
+# actual TensorDict/TorchData modules are absent.  They are imported by the
+# simulated-user rollout and therefore must be repaired before the smoke test.
+# Keep this targeted reinstall dependency-free so it cannot replace the locked
+# PyTorch/vLLM runtime installed above.
+echo "Verifying the TensorDict/TorchData rollout dependencies..."
+python -m pip install --force-reinstall --no-deps \
+    'tensordict==0.5.0' \
+    'torchdata==0.8.0'
+
 # Transformers 4.49 constrains huggingface_hub to <1.0.  Hub 0.28.1 therefore
 # supplies `huggingface-cli`, not the newer `hf` executable.  Keep the locked
 # library version and make the current command name available inside this
@@ -87,6 +97,8 @@ import torch
 import vllm
 import xformers
 import pyarrow
+import tensordict
+import torchdata
 
 assert torch.__version__.startswith("2.4.0+cu121"), torch.__version__
 vllm_distribution_version = version("vllm")
@@ -97,6 +109,7 @@ assert visible_gpus >= 1, "PyTorch cannot see any GPU"
 print(f"PyTorch: {torch.__version__}; CUDA: {torch.version.cuda}; GPUs: {visible_gpus}")
 print(f"vLLM distribution: {vllm_distribution_version}; xFormers: {xformers.__version__}")
 print(f"PyArrow: {pyarrow.__version__} (Parquet support: OK)")
+print(f"TensorDict: {tensordict.__version__}; TorchData: {torchdata.__version__}")
 PY
 
 echo "Installing Ninja before building FlashAttention (MAX_JOBS=${MAX_JOBS})..."
