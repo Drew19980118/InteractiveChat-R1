@@ -88,18 +88,18 @@ InteractiveChat-R1/
 
 The supplied environment lock is designed for a clean **Linux x86_64, Python 3.10, NVIDIA H100/H200** installation with CUDA 12.1 wheels, PyTorch 2.4.0, vLLM 0.6.3, Ray 2.10.0, Transformers 4.49.0, and FlashAttention 2.5.8.  An NVIDIA driver at least `525.60.13` is required.
 
-The recommended single-node layout has eight H100 80GB GPUs:
+The reference single-node layout has four H200 141GB GPUs:
 
 | Role | Recommended GPUs | Notes |
 |---|---:|---|
-| Local FAISS retriever | `0,1` | May use one GPU if the index fits. |
-| Frozen Qwen2.5-32B user simulator | `2,3` | Tensor parallel size 2. |
-| Policy / reference / critic / rollout | `4,5,6,7` | FSDP, global train context batch 128. |
+| Local FAISS retriever | `0,1` | Co-located with the simulator; may use one GPU if the index fits. |
+| Frozen Qwen2.5-32B user simulator | `0,1` | Tensor parallel size 2. |
+| Policy / reference / critic / rollout | `2,3` | FSDP, global train context batch 128. |
 
 Two policy GPUs are supported by setting `N_GPUS=2` and `ULYSSES_SEQUENCE_PARALLEL_SIZE=2`; keep the same global batch and reduce only `ROLLOUT_GPU_MEMORY_UTILIZATION` if necessary.  The 7B launchers use a conservative `0.04` vLLM cache fraction by default.  This does not change the 8192-token model context window or the optimization recipe.
 
-On a four-H200 node, co-locate the retriever and simulator on GPUs `0,1`, and
-use GPUs `2,3` for policy training and validation:
+Thus, keep GPUs `0,1` for the retriever and simulator, and use GPUs `2,3`
+for policy training and validation:
 
 ```bash
 export CUDA_VISIBLE_DEVICES=2,3
@@ -370,7 +370,7 @@ The policy’s private thought/tool/evidence trace is never sent to the simulato
 ```bash
 mkdir -p logs
 nohup env \
-  CUDA_VISIBLE_DEVICES=2,3 \
+  CUDA_VISIBLE_DEVICES=0,1 \
   SIMULATOR_GPU_MEMORY_UTILIZATION=0.45 \
   SIMULATOR_MAX_MODEL_LEN=8192 \
   SIMULATOR_MAX_NUM_SEQS=1 \
