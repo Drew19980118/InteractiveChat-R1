@@ -411,10 +411,16 @@ All provided full-method training launchers use exactly the current formal setti
 
 ### InsCiT: train and final online validation
 
+The commands below assume a four-GPU node where GPUs `0,1` serve the
+retriever and the 32B user simulator, and GPUs `2,3` are reserved for policy
+training and validation.  On another layout, change these three variables
+together: `CUDA_VISIBLE_DEVICES`, `N_GPUS`, and
+`ULYSSES_SEQUENCE_PARALLEL_SIZE`.
+
 ```bash
 # Qwen2.5-3B
-CUDA_VISIBLE_DEVICES=4,5,6,7 \
-N_GPUS=4 ULYSSES_SEQUENCE_PARALLEL_SIZE=4 \
+CUDA_VISIBLE_DEVICES=2,3 \
+N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
 USER_SIMULATOR_BASE_URL=http://127.0.0.1:8010 \
 USER_SIMULATOR_MODEL=qwen32b-user-simulator \
 INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
@@ -423,8 +429,8 @@ bash scripts/run_inscit_3b_full_train.sh
 
 ```bash
 # Qwen2.5-7B
-CUDA_VISIBLE_DEVICES=4,5,6,7 \
-N_GPUS=4 ULYSSES_SEQUENCE_PARALLEL_SIZE=4 \
+CUDA_VISIBLE_DEVICES=2,3 \
+N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
 USER_SIMULATOR_BASE_URL=http://127.0.0.1:8010 \
 USER_SIMULATOR_MODEL=qwen32b-user-simulator \
 INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
@@ -435,8 +441,8 @@ bash scripts/run_inscit_7b_full_train.sh
 
 ```bash
 # Qwen2.5-3B
-CUDA_VISIBLE_DEVICES=4,5,6,7 \
-N_GPUS=4 ULYSSES_SEQUENCE_PARALLEL_SIZE=4 \
+CUDA_VISIBLE_DEVICES=2,3 \
+N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
 USER_SIMULATOR_BASE_URL=http://127.0.0.1:8010 \
 USER_SIMULATOR_MODEL=qwen32b-user-simulator \
 INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
@@ -445,8 +451,8 @@ bash scripts/run_qrecc_3b_full_train.sh
 
 ```bash
 # Qwen2.5-7B
-CUDA_VISIBLE_DEVICES=4,5,6,7 \
-N_GPUS=4 ULYSSES_SEQUENCE_PARALLEL_SIZE=4 \
+CUDA_VISIBLE_DEVICES=2,3 \
+N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
 USER_SIMULATOR_BASE_URL=http://127.0.0.1:8010 \
 USER_SIMULATOR_MODEL=qwen32b-user-simulator \
 INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
@@ -462,7 +468,7 @@ dialogue prefix and uses no simulator feedback or retry. It retains answer-F1,
 action, format, and clarification-F1 rewards:
 
 ```bash
-CUDA_VISIBLE_DEVICES=4,5,6,7 N_GPUS=4 ULYSSES_SEQUENCE_PARALLEL_SIZE=4 \
+CUDA_VISIBLE_DEVICES=2,3 N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
 bash scripts/run_inscit_3b_static_no_feedback_train.sh
 ```
 
@@ -475,7 +481,7 @@ answer-correctness, action, and format supervision.
 The checkpoint `global_step_9` means the completed updates are 0–9.  Resume to a total of 15 steps as follows:
 
 ```bash
-CUDA_VISIBLE_DEVICES=4,5,6,7 N_GPUS=4 ULYSSES_SEQUENCE_PARALLEL_SIZE=4 \
+CUDA_VISIBLE_DEVICES=2,3 N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
 USER_SIMULATOR_BASE_URL=http://127.0.0.1:8010 \
 USER_SIMULATOR_MODEL=qwen32b-user-simulator \
 RESUME_MODE=resume_path \
@@ -491,8 +497,8 @@ All validation launchers run the same interactive environment: the simulator can
 Use the same running retriever and user simulator.  For example, evaluate an InsCiT-trained 3B actor on TopiOCQA:
 
 ```bash
-CUDA_VISIBLE_DEVICES=4,5,6,7 \
-N_GPUS=4 ULYSSES_SEQUENCE_PARALLEL_SIZE=4 \
+CUDA_VISIBLE_DEVICES=2,3 \
+N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
 USER_SIMULATOR_BASE_URL=http://127.0.0.1:8010 \
 USER_SIMULATOR_MODEL=qwen32b-user-simulator \
 CHECKPOINT_PATH=$PWD/outputs/inscit/interactivechat_r1_inscit_3b_full_f1_satisfaction_15steps/global_step_14 \
