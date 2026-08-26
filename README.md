@@ -39,23 +39,25 @@ Terminal actions are dataset-specific:
 | TopiOCQA | `answer`, `nonanswer` |
 | QReCC / CoRAL | `answer` |
 
-The canonical objective combines **UCI** and interactive task/user channels:
+The canonical objective combines answer correctness with interactive
+user-satisfaction channels:
 
 \[
-r = r_{\mathrm{action}} + r_{\mathrm{UCI}} + r_{\mathrm{clarity}}
+r = r_{\mathrm{action}} + r_{\mathrm{answer\text{-}F1}} + r_{\mathrm{clarity}}
     + r_{\mathrm{patience}} + r_{\mathrm{format}} + r_{\mathrm{clarify\text{-}F1}}.
 \]
 
-Here, UCI measures whether the current answer increases the probability of the
-gold answer under a frozen evaluator, conditioned on the current question,
-history, and retrieved evidence.  Clarity and patience model user
-understandability and repair burden.  Each channel is normalized independently
-within its active sibling group.  The terminal user-facing return is propagated
-only through policy actions in the same source sub-task, so retrieval queries
-receive credit without reward crossing into a future user turn.
+For a valid `answer`, token-set answer F1 is the reference-answer correctness
+proxy.  The frozen user simulator independently evaluates clarity and remaining
+repair burden: level 1 rewards task resolution, while levels 2/3 incur clarity
+and patience penalties and trigger answer-only retries. Each channel is
+normalized independently within its active sibling group. The terminal
+user-facing return is propagated only through policy actions in the same source
+sub-task, so retrieval queries receive credit without reward crossing into a
+future user turn.
 
-The canonical configuration disables answer-stripped evidence-utility and
-search-efficiency shaping.
+The canonical configuration disables frozen-model likelihood rewards,
+answer-stripped evidence-utility, and search-efficiency shaping.
 
 ## Codebase
 
@@ -67,10 +69,10 @@ InteractiveChat-R1/
 │   ├── prepare_simulated_user_*.py       # static JSON -> dynamic Parquet adapters
 │   ├── run_local_retriever_server.sh     # FAISS /retrieve service
 │   ├── run_user_simulator_server.sh      # frozen Qwen32B OpenAI-compatible server
-│   ├── run_{inscit,qrecc}_{3b,7b}_uci_train.sh
-│   ├── run_{inscit,qrecc}_{3b,7b}_uci_val.sh
-│   ├── run_topiocqa_from_inscit_*_uci_val.sh
-│   └── run_coral_from_qrecc_*_uci_val.sh
+│   ├── run_{inscit,qrecc}_{3b,7b}_full_train.sh
+│   ├── run_{inscit,qrecc}_{3b,7b}_full_val.sh
+│   ├── run_topiocqa_from_inscit_*_full_val.sh
+│   └── run_coral_from_qrecc_*_full_val.sh
 ├── data/                         # create locally; downloaded dynamic benchmark Parquet
 ├── models/                       # create locally; Qwen checkpoints
 ├── collection/                   # create locally; corpus and FAISS index
@@ -388,7 +390,7 @@ The expected model ID is `qwen32b-user-simulator`.  If port 8010 is occupied, ei
 
 ### Canonical configuration
 
-All provided UCI training launchers use exactly the current formal setting:
+All provided full-method training launchers use exactly the current formal setting:
 
 | Setting | InsCiT | QReCC |
 |---|---:|---:|
@@ -403,7 +405,7 @@ All provided UCI training launchers use exactly the current formal setting:
 | Search | 1 query/tool call, top-3 passages | 1 query/tool call, top-3 passages |
 | Tool-call / answer-depth limit | 4 / 3 | 4 / 3 |
 | Model context / max response | 8192 / 500 | 8192 / 500 |
-| Reward | action + UCI + clarity + patience + format + clarify-F1 | action + UCI + clarity + patience + format |
+| Reward | action + answer-F1 + clarity + patience + format + clarify-F1 | action + answer-F1 + clarity + patience + format |
 
 `EXACT_CONTEXT_BATCH=true` packs complete dialogues so that exactly 128 original sub-task contexts contribute to each update, without splitting a dialogue when calculating sibling advantages.  The collected trajectory count is therefore `128 × 8 = 1024` rollout rows per update.
 
@@ -416,7 +418,7 @@ N_GPUS=4 ULYSSES_SEQUENCE_PARALLEL_SIZE=4 \
 USER_SIMULATOR_BASE_URL=http://127.0.0.1:8010 \
 USER_SIMULATOR_MODEL=qwen32b-user-simulator \
 INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
-bash scripts/run_inscit_3b_uci_train.sh
+bash scripts/run_inscit_3b_full_train.sh
 ```
 
 ```bash
@@ -426,7 +428,7 @@ N_GPUS=4 ULYSSES_SEQUENCE_PARALLEL_SIZE=4 \
 USER_SIMULATOR_BASE_URL=http://127.0.0.1:8010 \
 USER_SIMULATOR_MODEL=qwen32b-user-simulator \
 INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
-bash scripts/run_inscit_7b_uci_train.sh
+bash scripts/run_inscit_7b_full_train.sh
 ```
 
 ### QReCC: train and final online validation
@@ -438,7 +440,7 @@ N_GPUS=4 ULYSSES_SEQUENCE_PARALLEL_SIZE=4 \
 USER_SIMULATOR_BASE_URL=http://127.0.0.1:8010 \
 USER_SIMULATOR_MODEL=qwen32b-user-simulator \
 INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
-bash scripts/run_qrecc_3b_uci_train.sh
+bash scripts/run_qrecc_3b_full_train.sh
 ```
 
 ```bash
@@ -448,34 +450,25 @@ N_GPUS=4 ULYSSES_SEQUENCE_PARALLEL_SIZE=4 \
 USER_SIMULATOR_BASE_URL=http://127.0.0.1:8010 \
 USER_SIMULATOR_MODEL=qwen32b-user-simulator \
 INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
-bash scripts/run_qrecc_7b_uci_train.sh
+bash scripts/run_qrecc_7b_full_train.sh
 ```
 
 Each run automatically performs the full online test after the final step and then computes F1, BERTScore, NDCG@3, action accuracy (where applicable), format success rate, user satisfaction, simulator fallback rate, mean retry depth, and mean tool calls.
 
 ### Controlled ablations
 
-The UCI-to-answer-F1 study preserves all other interactive reward channels and
-replaces UCI with token-set answer F1:
-
-```bash
-CUDA_VISIBLE_DEVICES=4,5,6,7 N_GPUS=4 ULYSSES_SEQUENCE_PARALLEL_SIZE=4 \
-USER_SIMULATOR_BASE_URL=http://127.0.0.1:8010 \
-USER_SIMULATOR_MODEL=qwen32b-user-simulator \
-bash scripts/run_inscit_3b_uci_to_f1_train.sh
-```
-
 The static-context/no-feedback study starts every sub-task from the canonical
-dialogue prefix and uses no simulator feedback or retry.  It retains action,
-UCI, format, and clarification-F1 rewards:
+dialogue prefix and uses no simulator feedback or retry. It retains answer-F1,
+action, format, and clarification-F1 rewards:
 
 ```bash
 CUDA_VISIBLE_DEVICES=4,5,6,7 N_GPUS=4 ULYSSES_SEQUENCE_PARALLEL_SIZE=4 \
-bash scripts/run_inscit_3b_static_uci_no_feedback_train.sh
+bash scripts/run_inscit_3b_static_no_feedback_train.sh
 ```
 
-`run_inscit_3b_ablation_suite.sh` runs these two ablations serially.  Keep the
-retriever running for both runs and the user simulator running for the first.
+The canonical full method uses online, model-generated dialogue context and
+simulator feedback; this control removes both while retaining the same
+answer-correctness, action, and format supervision.
 
 ### Resume an interrupted run
 
@@ -486,9 +479,9 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 N_GPUS=4 ULYSSES_SEQUENCE_PARALLEL_SIZE=4 \
 USER_SIMULATOR_BASE_URL=http://127.0.0.1:8010 \
 USER_SIMULATOR_MODEL=qwen32b-user-simulator \
 RESUME_MODE=resume_path \
-RESUME_FROM_PATH=$PWD/outputs/inscit/interactivechat_r1_inscit_3b_uci_15steps/global_step_9 \
+RESUME_FROM_PATH=$PWD/outputs/inscit/interactivechat_r1_inscit_3b_full_f1_satisfaction_15steps/global_step_9 \
 TOTAL_STEPS=15 \
-bash scripts/run_inscit_3b_uci_train.sh
+bash scripts/run_inscit_3b_full_train.sh
 ```
 
 ## Online evaluation
@@ -502,18 +495,18 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 \
 N_GPUS=4 ULYSSES_SEQUENCE_PARALLEL_SIZE=4 \
 USER_SIMULATOR_BASE_URL=http://127.0.0.1:8010 \
 USER_SIMULATOR_MODEL=qwen32b-user-simulator \
-CHECKPOINT_PATH=$PWD/outputs/inscit/interactivechat_r1_inscit_3b_uci_15steps/global_step_14 \
-bash scripts/run_topiocqa_from_inscit_3b_uci_val.sh
+CHECKPOINT_PATH=$PWD/outputs/inscit/interactivechat_r1_inscit_3b_full_f1_satisfaction_15steps/global_step_14 \
+bash scripts/run_topiocqa_from_inscit_3b_full_val.sh
 ```
 
 Available launchers:
 
 | Source checkpoint | In-domain online test | Transfer online test |
 |---|---|---|
-| InsCiT 3B | `run_inscit_3b_uci_val.sh` | `run_topiocqa_from_inscit_3b_uci_val.sh` |
-| InsCiT 7B | `run_inscit_7b_uci_val.sh` | `run_topiocqa_from_inscit_7b_uci_val.sh` |
-| QReCC 3B | `run_qrecc_3b_uci_val.sh` | `run_coral_from_qrecc_3b_uci_val.sh` |
-| QReCC 7B | `run_qrecc_7b_uci_val.sh` | `run_coral_from_qrecc_7b_uci_val.sh` |
+| InsCiT 3B | `run_inscit_3b_full_val.sh` | `run_topiocqa_from_inscit_3b_full_val.sh` |
+| InsCiT 7B | `run_inscit_7b_full_val.sh` | `run_topiocqa_from_inscit_7b_full_val.sh` |
+| QReCC 3B | `run_qrecc_3b_full_val.sh` | `run_coral_from_qrecc_3b_full_val.sh` |
+| QReCC 7B | `run_qrecc_7b_full_val.sh` | `run_coral_from_qrecc_7b_full_val.sh` |
 
 ## Outputs and metrics
 

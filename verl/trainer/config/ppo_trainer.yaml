@@ -218,8 +218,8 @@ algorithm:
   use_action_reward: false
   # Opt-in full-dialogue simulated-user sparse GRPO. Legacy IGPO remains the default.
   simulated_user_enabled: false
-  # ``full`` is the proposed complete reward. ``answer_f1_only`` preserves
-  # online interaction but sends only valid answer-vs-gold F1 to sparse GRPO.
+  # ``full`` is the proposed F1 + user-satisfaction objective. ``answer_f1_only``
+  # preserves online interaction but sends only valid answer-vs-gold F1 to GRPO.
   simulated_user_reward_mode: full  # full | answer_f1_only
   simulated_user_allow_clarify: true
   simulated_user_mode: openai  # openai | mock (mock is smoke-test only)
@@ -270,20 +270,19 @@ algorithm:
   # resets each source sub-task to its canonical gold dialogue prefix.
   simulated_user_enable_feedback: true
   simulated_user_static_gold_context: false
-  simulated_user_enable_evidence_utility: true
-  simulated_user_enable_search_efficiency: true
+  simulated_user_enable_evidence_utility: false
+  simulated_user_enable_search_efficiency: false
   # Independent reward-channel weights used only by simulated-user sparse GRPO.
   simulated_user_action_weight: 1.0
   simulated_user_answer_f1_weight: 1.0
   # Score the gold answer after removing the terminal policy response, leaving
   # only prior dialogue, private search queries and retrieved passages.  This
   # is independently normalized per dialogue/subtask/retry-depth.
-  simulated_user_evidence_utility_weight: 1.0
+  simulated_user_evidence_utility_weight: 0.0
   # Terminal answer reward -max(0, K - 1), where K is the number of retrievals
   # in its sub-task. The first search is free; independently normalized per
   # dialogue/subtask/retry-depth before this weight. Ablate 0.1 / 0.25 / 0.5.
-  simulated_user_search_efficiency_weight: 0.25
-  simulated_user_uci_weight: 1.0
+  simulated_user_search_efficiency_weight: 0.0
   simulated_user_clarity_weight: 1.0
   simulated_user_patience_weight: 1.0
   simulated_user_format_weight: 1.0

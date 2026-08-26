@@ -443,7 +443,6 @@ def compute_advantage(
                 "answer_f1",
                 "evidence_utility",
                 "search_efficiency",
-                "uci",
                 "clarity",
                 "patience",
                 "format",
@@ -665,10 +664,10 @@ class RayPPOTrainer:
             allow_nonanswer=bool(self.config.algorithm.get("allow_nonanswer_action", True)),
             reward_mode=str(self.config.algorithm.get("simulated_user_reward_mode", "full")),
             enable_evidence_utility=bool(
-                self.config.algorithm.get("simulated_user_enable_evidence_utility", True)
+                self.config.algorithm.get("simulated_user_enable_evidence_utility", False)
             ),
             enable_search_efficiency=bool(
-                self.config.algorithm.get("simulated_user_enable_search_efficiency", True)
+                self.config.algorithm.get("simulated_user_enable_search_efficiency", False)
             ),
             enable_user_feedback=bool(
                 self.config.algorithm.get("simulated_user_enable_feedback", True)
@@ -1904,7 +1903,6 @@ class RayPPOTrainer:
                                 "sim_user_answer_f1_mask",
                                 "sim_user_evidence_utility_mask",
                                 "sim_user_search_efficiency_mask",
-                                "sim_user_uci_mask",
                                 "sim_user_clarity_mask",
                                 "sim_user_patience_mask",
                                 "sim_user_format_mask",
@@ -1925,7 +1923,6 @@ class RayPPOTrainer:
                                 "sim_user_answer_f1_values",
                                 "sim_user_evidence_utility_values",
                                 "sim_user_search_efficiency_values",
-                                "sim_user_uci_values",
                                 "sim_user_clarity_values",
                                 "sim_user_patience_values",
                                 "sim_user_format_values",
@@ -1984,10 +1981,6 @@ class RayPPOTrainer:
                                 metrics["sim_user/answer_f1_reward_std"] = float(
                                     np.std(answer_f1_values)
                                 )
-                            uci_values = [event["uci"] for event in sim_events if event.get("uci") is not None]
-                            if uci_values:
-                                metrics["sim_user/uci_mean"] = float(np.mean(uci_values))
-                                metrics["sim_user/uci_std"] = float(np.std(uci_values))
                             evidence_utility_values = [
                                 event["evidence_utility"]
                                 for event in sim_events
@@ -2157,7 +2150,6 @@ class RayPPOTrainer:
                                 "answer_f1",
                                 "evidence_utility",
                                 "search_efficiency",
-                                "uci",
                                 "clarity",
                                 "patience",
                                 "format",

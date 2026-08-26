@@ -29,7 +29,6 @@ from scrl.llm_agent.simulated_user import (
     parse_dialogue_payload,
 )
 from verl import DataProto
-from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.utils.torch_functional import get_response_mask, pad_2d_list_to_length
 
 
@@ -38,17 +37,16 @@ _COMPONENTS = (
     "answer_f1",
     "evidence_utility",
     "search_efficiency",
-    "uci",
     "clarity",
     "patience",
     "format",
     "clarify_f1",
 )
 
-# These two modes keep the task-control and user-satisfaction channels used by
-# the proposed method.  ``uci_replaced_by_answer_f1`` changes exactly one
-# answer-quality channel, rather than accidentally turning the comparison into
-# a broad "F1 only" reward ablation.
+# ``full`` is the proposed method: answer-reference F1 supplies the answer
+# correctness signal, while the user simulator supplies clarity and patience
+# signals. ``uci_replaced_by_answer_f1`` is retained as a legacy alias for
+# earlier configurations; it has exactly the same reward semantics as full.
 _FULL_AUXILIARY_CHANNEL_MODES = frozenset({"full", "uci_replaced_by_answer_f1"})
 
 
@@ -79,18 +77,16 @@ class SimulatedUserSettings:
 
     allow_clarify: bool = True
     allow_nonanswer: bool = True
-    # ``full`` uses UCI as the answer-quality channel.
-    # ``uci_replaced_by_answer_f1`` is the controlled UCI ablation: it keeps
-    # all other proposed-method channels but substitutes terminal answer F1
-    # for UCI.  ``answer_f1_only`` is the intentionally much stronger
-    # F1-only baseline, which sends no auxiliary reward channels to GRPO.
+    # ``full`` uses terminal answer-vs-gold token F1 as its answer-correctness
+    # channel and retains action, clarity, patience, format, and clarify-F1.
+    # ``uci_replaced_by_answer_f1`` is a backwards-compatible alias.  In
+    # contrast, ``answer_f1_only`` is the intentionally much stronger
+    # baseline which sends no auxiliary reward channels to GRPO.
     reward_mode: str = "full"
-    # The original UCI method does not use the answer-stripped evidence-only
-    # channel or a repeated-search penalty.  Keep these independently
-    # switchable so an ablation can remove the channels rather than merely
-    # giving their normalized advantages a zero weight.
-    enable_evidence_utility: bool = True
-    enable_search_efficiency: bool = True
+    # These legacy shaping channels are intentionally off in the canonical
+    # method. Keep their switches only for archived experimental configs.
+    enable_evidence_utility: bool = False
+    enable_search_efficiency: bool = False
     # When disabled, a correct answer advances immediately: no remote user
     # simulator call, no clarity/patience reward, and no answer retry.  The
     # static-context ablation additionally resets each sub-task to its source
@@ -111,7 +107,7 @@ class SimulatedUserSettings:
     simulator_model: Optional[str] = None
     simulator_timeout_seconds: int = 120
     # Caps apply only to the frozen user-simulator evaluation request. They do
-    # not truncate policy trajectories, UCI inputs, or the actor update.
+    # not truncate policy trajectories or the actor update.
     simulator_question_token_cap: int = 384
     simulator_gold_response_token_cap: int = 768
     simulator_answer_token_cap: int = 768
@@ -156,7 +152,6 @@ class _Event:
     # The first retrieval is free; each additional retrieval receives one unit
     # of penalty before same-depth sibling normalization.
     search_efficiency: Optional[float] = None
-    uci: Optional[float] = None
     expected_action: str = ""
     # Exact live policy context immediately before this assistant action.  It
     # allows evidence to be compacted later without changing the log-prob
@@ -206,9 +201,8 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
 
     There are two intentionally separate phases at every policy answer:
 
-    1. The pre-update actor scores UCI under ``torch.no_grad``.  The actor is
-       not updated until all rollout scoring has completed, so this is the
-       required frozen old-policy score without keeping a second model copy.
+    1. The terminal answer receives direct answer-vs-gold F1, while the
+       action, format, clarity, and patience channels remain separate.
     2. The external Qwen32B simulator returns only a clarity level and short
        feedback.  It never becomes a policy assistant message.
     """
@@ -575,83 +569,6 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
         )
         return active
 
-    def _score_uci_batch(
-        self,
-        requests: list[tuple[_State, list[dict[str, Any]], str]],
-    ) -> tuple[list[float], list[float]]:
-        """Return UCI and answer-stripped evidence utility for each request.
-
-        ``uci`` is ``logP(gold|history+answer)-logP(gold|history)``.  The
-        accompanying evidence utility is the latter absolute score only:
-        after removing the *whole* terminal assistant response, it measures
-        how likely the old policy finds the gold under the preceding dialogue,
-        private queries, and retrieved passages.  It is independently
-        normalized among same-dialogue/same-subtask/same-depth siblings, so
-        an absolute log-prob becomes a relative positive/negative reward.
-
-        Both score states receive the same invisible evaluator prompt.  The
-        prompt is never appended to a policy rollout; this is a no-gradient
-        old-policy probe after generation and before the actor update.
-        """
-        if not requests:
-            return [], []
-        prompt_messages: list[list[dict[str, Any]]] = []
-        targets: list[list[int]] = []
-        lookup: list[tuple[int, bool]] = []
-        probe = (
-            "Internal evaluator request: give the canonical answer to the current user question "
-            "in one concise response."
-        )
-        for request_index, (_state, before, gold) in enumerate(requests):
-            if not gold.strip():
-                lookup.extend(((request_index, False), (request_index, True)))
-                prompt_messages.extend((before, before))
-                targets.extend(([], []))
-                continue
-            after = [dict(message) for message in before]
-            # ``before`` passed in already includes the generated assistant answer.
-            # Its companion history removes that final policy assistant message.
-            history = [dict(message) for message in before[:-1]]
-            for include_answer, messages in ((False, history), (True, after)):
-                scored_messages = [dict(message) for message in messages]
-                scored_messages.append({"role": "user", "content": probe})
-                prompt_messages.append(scored_messages)
-                target = self.tokenizer(
-                    gold + "\n<|im_end|>", add_special_tokens=False
-                )["input_ids"]
-                targets.append(target)
-                lookup.append((request_index, include_answer))
-
-        nonempty = [index for index, target in enumerate(targets) if target]
-        scores = [0.0] * len(targets)
-        if nonempty:
-            prompts = self._build_rollings_from_messages(
-                [prompt_messages[index] for index in nonempty],
-                self._prompt_token_budget(max(len(targets[index]) for index in nonempty)),
-            )
-            pseudo = self.pseudo_generate_sequences(
-                prompts,
-                [targets[index] for index in nonempty],
-            )
-            padded, pad_size = pad_dataproto_to_divisor(pseudo, self.actor_rollout_wg.world_size)
-            log_probs = self.actor_rollout_wg.compute_log_prob(padded)
-            log_probs = unpad_dataproto(log_probs, pad_size=pad_size)
-            for local_index, global_index in enumerate(nonempty):
-                token_count = len(targets[global_index])
-                values = log_probs.batch["old_log_probs"][local_index, :token_count]
-                mean = float(values.mean().item()) if token_count else 0.0
-                scores[global_index] = mean if math.isfinite(mean) else 0.0
-
-        per_request: list[dict[bool, float]] = [dict() for _ in requests]
-        for score, (request_index, include_answer) in zip(scores, lookup):
-            per_request[request_index][include_answer] = score
-        evidence_utilities = [parts.get(False, 0.0) for parts in per_request]
-        uci_values = [
-            parts.get(True, 0.0) - parts.get(False, 0.0)
-            for parts in per_request
-        ]
-        return uci_values, evidence_utilities
-
     @staticmethod
     def _append_public_assistant_message(state: _State, content: Any) -> None:
         """Add one user-visible assistant utterance to the simulator view."""
@@ -815,7 +732,6 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
         raw_response: str,
         original_raw_response: str,
         trailing_content_discarded: bool,
-        pending_uci: list[tuple[_Event, _State, list[dict[str, Any]], str]],
         pending_judgements: list[tuple[_State, _Event, str]],
     ) -> None:
         expected = state.subtask["expected_action"]
@@ -827,7 +743,7 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
             trailing_content_discarded=trailing_content_discarded,
         )
         # Action reward is collected only at the initial terminal decision.
-        # The controlled UCI→F1 ablation keeps this channel; the F1-only
+        # The full F1+satisfaction objective keeps this channel; the F1-only
         # baseline deliberately omits it together with all other auxiliaries.
         if (
             self.settings.reward_mode in _FULL_AUXILIARY_CHANNEL_MODES
@@ -860,28 +776,15 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
             pending_judgements.append((state, event, action.content))
             return
 
-        if self.settings.reward_mode == "uci_replaced_by_answer_f1":
-            # Controlled ablation: all task-control, formatting and simulator
-            # satisfaction channels remain active, but direct answer-vs-gold
-            # F1 replaces the UCI channel.  No frozen-model UCI forward is
-            # scheduled in this branch.
+        if self.settings.reward_mode in _FULL_AUXILIARY_CHANNEL_MODES:
+            # Full objective: answer-reference F1 measures answer correctness;
+            # simulator-derived clarity and patience measure user satisfaction.
+            # No frozen-model likelihood, evidence-utility, or
+            # search-efficiency reward is scheduled in this method.
             event.answer_f1 = _token_f1(action.content, state.subtask["gold_response"])
             event.components["answer_f1"] = event.answer_f1
-            if self.settings.enable_search_efficiency:
-                event.search_efficiency = self._search_efficiency_reward(state.tool_calls)
-                event.components["search_efficiency"] = event.search_efficiency
             pending_judgements.append((state, event, action.content))
             return
-
-        # The first retrieval is normally necessary, so charge only the second
-        # and later calls.  Placing this on the terminal answer lets sparse
-        # reward-to-go teach all earlier query actions without extra scoring
-        # forwards per tool call.
-        if self.settings.enable_search_efficiency:
-            event.search_efficiency = self._search_efficiency_reward(state.tool_calls)
-            event.components["search_efficiency"] = event.search_efficiency
-        # Correct answer: score UCI before any user-simulator feedback is appended.
-        pending_uci.append((event, state, [dict(message) for message in state.messages], state.subtask["gold_response"]))
 
     def _handle_judgement(self, state: _State, event: _Event, answer: str) -> None:
         if not self.settings.enable_user_feedback:
@@ -1144,7 +1047,6 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
             "answer_f1": event.answer_f1,
             "evidence_utility": event.evidence_utility,
             "search_efficiency": event.search_efficiency,
-            "uci": event.uci,
         }
 
     def _state_record(
@@ -1209,7 +1111,6 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
             generated = self._generate_with_gpu_padding(generation_input)
             decoded = self.tokenizer.batch_decode(generated.batch["responses"], skip_special_tokens=False)
             pending_tools: list[tuple[_State, _Event, AgentAction]] = []
-            pending_uci: list[tuple[_Event, _State, list[dict[str, Any]], str]] = []
             pending_judgements: list[tuple[_State, _Event, str]] = []
             for state, decoded_response in zip(active, decoded):
                 generated_text = decoded_response.replace("<|endoftext|>", "").strip()
@@ -1267,7 +1168,6 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
                     raw,
                     original_raw,
                     trailing_content_discarded,
-                    pending_uci,
                     pending_judgements,
                 )
 
@@ -1307,29 +1207,6 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
                     state.tool_calls += 1
                     self._enforce_live_policy_context_budget(state)
 
-            if pending_uci:
-                uci_values, evidence_utilities = self._score_uci_batch(
-                    [(state, messages, gold) for event, state, messages, gold in pending_uci]
-                )
-                for (event, state, _messages, _gold), uci, evidence_utility in zip(
-                    pending_uci, uci_values, evidence_utilities
-                ):
-                    # This value is scored after removing the complete final
-                    # policy response.  It cannot be inflated by answer text
-                    # or private terminal <think> content.
-                    if self.settings.enable_evidence_utility:
-                        event.evidence_utility = evidence_utility
-                        event.components["evidence_utility"] = evidence_utility
-                    event.uci = uci
-                    event.components["uci"] = uci
-                    answer = parse_agent_action(
-                        event.raw_response,
-                        allow_clarify=self.settings.allow_clarify,
-                        allow_nonanswer=self.settings.allow_nonanswer,
-                        force_answer=event.response_depth > 1,
-                        max_search_queries=self.settings.max_search_queries,
-                    ).content
-                    pending_judgements.append((state, event, answer))
             for state, event, answer in pending_judgements:
                 self._handle_judgement(state, event, answer)
 

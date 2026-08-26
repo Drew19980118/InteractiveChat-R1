@@ -79,11 +79,11 @@ def test_answer_locked_retry_allows_tool_but_rejects_nonanswer_and_empty_answer(
     ).valid
 
 
-def test_controlled_uci_to_f1_ablation_keeps_auxiliary_channels_but_skips_uci():
-    """The UCI ablation must not silently become the broad F1-only baseline."""
+def test_full_f1_objective_keeps_auxiliary_channels_but_skips_uci():
+    """The full objective must not silently become the broad F1-only baseline."""
     manager = object.__new__(SimulatedUserGenerationManager)
     manager.settings = SimulatedUserSettings(
-        reward_mode="uci_replaced_by_answer_f1",
+        reward_mode="full",
         enable_search_efficiency=False,
     )
     state = _State(
@@ -103,7 +103,6 @@ def test_controlled_uci_to_f1_ablation_keeps_auxiliary_channels_but_skips_uci():
         subtask_initial_messages=[],
         pending_action_prompt=[],
     )
-    pending_uci = []
     pending_judgements = []
     manager._process_terminal_action(
         state,
@@ -111,7 +110,6 @@ def test_controlled_uci_to_f1_ablation_keeps_auxiliary_channels_but_skips_uci():
         raw_response="<think>x</think><answer>Paris</answer>",
         original_raw_response="<think>x</think><answer>Paris</answer>",
         trailing_content_discarded=False,
-        pending_uci=pending_uci,
         pending_judgements=pending_judgements,
     )
 
@@ -119,8 +117,6 @@ def test_controlled_uci_to_f1_ablation_keeps_auxiliary_channels_but_skips_uci():
     assert event.components["format"] == 0.0
     assert event.components["action"] == 1.0
     assert event.components["answer_f1"] == 1.0
-    assert "uci" not in event.components
-    assert pending_uci == []
     assert pending_judgements == [(state, event, "Paris")]
     assert not parse_agent_action(
         "<think>x</think><answer></answer>",
