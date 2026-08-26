@@ -551,9 +551,20 @@ python scripts/compute_convagent_eval_metrics.py \
 - **`/retrieve` returns 500:** verify the body includes `return_scores: true`; confirm the corpus rows and FAISS IDs are aligned; then run `scripts/test_local_retriever.py`.
 - **Simulator cannot start / port 8010 in use:** use `curl http://127.0.0.1:8010/v1/models` to identify a healthy existing server.  Do not kill the retriever on 8002.
 - **FSDP checkpoint shape mismatch:** `MODEL_PATH` must match the checkpoint scale exactly (3B checkpoint with Qwen2.5-3B, 7B checkpoint with Qwen2.5-7B); use a `global_step_*` directory as `CHECKPOINT_PATH`.
-- **`ModuleNotFoundError: tensordict`:** repair the two rollout dependencies
-  without changing the locked PyTorch/vLLM runtime, then repeat the smoke test:
-  `python -m pip install --force-reinstall --no-deps 'tensordict==0.5.0' 'torchdata==0.8.0'`.
+- **`ModuleNotFoundError: tensordict` or `cannot import name ForkingPickler`:**
+  do not upgrade TensorDict alone.  The released runtime is coupled to
+  **PyTorch `2.4.0+cu121` + TensorDict `0.5.0`**; the latter is incompatible
+  with PyTorch 2.5+.  Pull the latest repository version and rerun the full
+  installer from a base shell:
+  ```bash
+  conda activate base
+  MAX_JOBS=8 bash scripts/install_h100_eval_env.sh interactivechat-r1
+  conda activate interactivechat-r1
+  python -m pytest -q tests/trainer/ppo/test_simulated_user_sparse_grpo.py
+  ```
+  To inspect an existing environment before repairing it, run
+  `python -c "import torch; print(torch.__version__)"`; it must print
+  `2.4.0+cu121`.
 - **CUDA OOM:** do not reduce the 8192 model context.  First reserve clean policy GPUs, set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, and lower only `ROLLOUT_GPU_MEMORY_UTILIZATION` (e.g. `0.04`).
 - **`set: pipefail: invalid option name`:** the shell file has Windows CRLF endings.  On the Linux server run `sed -i 's/\r$//' scripts/<script>.sh` once.
 

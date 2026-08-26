@@ -61,8 +61,29 @@ core_requirements="$(mktemp)"
 trap 'rm -f "${core_requirements}"' EXIT
 grep -v '^flash-attn==' "${LOCK_FILE}" > "${core_requirements}"
 
-echo "Installing the locked PyTorch/vLLM runtime..."
+echo "Installing the locked PyTorch CUDA runtime..."
+# TensorDict 0.5 imports an API which exists in the PyTorch 2.4 series but was
+# removed by PyTorch 2.5.  Force the three Torch wheels here so that reusing a
+# partially-created environment cannot silently retain a newer Torch build.
+python -m pip install --force-reinstall --no-cache-dir \
+    --extra-index-url https://download.pytorch.org/whl/cu121 \
+    'torch==2.4.0+cu121' \
+    'torchvision==0.19.0+cu121' \
+    'torchaudio==2.4.0+cu121'
+
+echo "Installing the remaining locked vLLM runtime..."
 python -m pip install --requirement "${core_requirements}"
+
+python - <<'PY'
+import torch
+
+expected = "2.4.0+cu121"
+if torch.__version__ != expected:
+    raise SystemExit(
+        f"Locked runtime violation: expected torch {expected}, got {torch.__version__}."
+    )
+print(f"Locked PyTorch runtime: {torch.__version__}")
+PY
 
 # A partially created Conda environment can retain package metadata while the
 # actual TensorDict/TorchData modules are absent.  They are imported by the
@@ -120,7 +141,9 @@ python -m pip install 'ninja==1.13.0'
 command -v ninja >/dev/null 2>&1 || fail "Ninja was installed but is not on PATH."
 
 echo "Building FlashAttention from source..."
-python -m pip install --verbose --no-cache-dir --no-build-isolation 'flash-attn==2.5.8'
+# Torch may have been repaired above.  Rebuild instead of reusing an extension
+# that was compiled against a previous (possibly incompatible) Torch ABI.
+python -m pip install --force-reinstall --verbose --no-cache-dir --no-build-isolation 'flash-attn==2.5.8'
 python - <<'PY'
 from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input
 
