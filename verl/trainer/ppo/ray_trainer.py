@@ -672,6 +672,14 @@ class RayPPOTrainer:
             enable_user_feedback=bool(
                 self.config.algorithm.get("simulated_user_enable_feedback", True)
             ),
+            # The assessment-only path is intentionally validation-only.  It
+            # reports satisfaction for the no-feedback ablation without
+            # letting a simulator call alter training trajectories, rewards,
+            # or the policy-visible dialogue.
+            assess_user_satisfaction=bool(is_validation)
+            and bool(
+                self.config.algorithm.get("simulated_user_assess_satisfaction", False)
+            ),
             use_static_gold_context=bool(
                 self.config.algorithm.get("simulated_user_static_gold_context", False)
             ),

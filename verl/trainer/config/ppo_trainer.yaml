@@ -266,9 +266,13 @@ algorithm:
   simulated_user_intermediate_validation_max_batches: 2
   # Used only if exact batching is disabled for a tiny smoke test.
   simulated_user_rollout_dialogue_batch_size: null
-  # Full online method controls.  The static ablation disables feedback and
-  # resets each source sub-task to its canonical gold dialogue prefix.
+  # Full online method controls. ``enable_feedback=false`` suppresses user
+  # feedback/retry while retaining the model-generated dynamic dialogue.
+  # Static gold context is a separate legacy control and must be enabled
+  # explicitly.  ``assess_satisfaction`` is validation-only: it reports a
+  # hidden level-1/2/3 judgement without feeding it back to the policy.
   simulated_user_enable_feedback: true
+  simulated_user_assess_satisfaction: false
   simulated_user_static_gold_context: false
   simulated_user_enable_evidence_utility: false
   simulated_user_enable_search_efficiency: false

@@ -47,6 +47,7 @@ MAX_SEARCH_QUERIES="${MAX_SEARCH_QUERIES:-1}"
 SEARCH_TOP_K="${SEARCH_TOP_K:-3}"
 MAX_ANSWER_DEPTH="${MAX_ANSWER_DEPTH:-3}"
 SIMULATED_USER_ENABLE_FEEDBACK="${SIMULATED_USER_ENABLE_FEEDBACK:-true}"
+SIMULATED_USER_ASSESS_SATISFACTION="${SIMULATED_USER_ASSESS_SATISFACTION:-false}"
 SIMULATED_USER_STATIC_GOLD_CONTEXT="${SIMULATED_USER_STATIC_GOLD_CONTEXT:-false}"
 # Dynamic-evidence default: retain a fresh top-3 in full, compact old
 # retrievals only if the live policy context requires it.
@@ -72,14 +73,14 @@ if [[ ! -f "$TRAIN_FILE" || ! -f "$VAL_FILE" ]]; then
   echo "ERROR: missing parquet: TRAIN_FILE=$TRAIN_FILE VAL_FILE=$VAL_FILE" >&2
   exit 2
 fi
-for boolean_name in SIMULATED_USER_ENABLE_FEEDBACK SIMULATED_USER_STATIC_GOLD_CONTEXT; do
+for boolean_name in SIMULATED_USER_ENABLE_FEEDBACK SIMULATED_USER_ASSESS_SATISFACTION SIMULATED_USER_STATIC_GOLD_CONTEXT; do
   boolean_value="${!boolean_name}"
   if [[ "$boolean_value" != "true" && "$boolean_value" != "false" ]]; then
     echo "ERROR: $boolean_name must be true or false." >&2
     exit 2
   fi
 done
-if [[ "$SIMULATED_USER_ENABLE_FEEDBACK" == "true" ]]; then
+if [[ "$SIMULATED_USER_ENABLE_FEEDBACK" == "true" || "$SIMULATED_USER_ASSESS_SATISFACTION" == "true" ]]; then
   : "${USER_SIMULATOR_BASE_URL:?Example: http://127.0.0.1:8010}"
   : "${USER_SIMULATOR_MODEL:?Set the served Qwen32B user-simulator name.}"
 fi
@@ -135,7 +136,7 @@ mkdir -p "$OUTPUT_DIR" "$EVAL_DIR" "$PROJECT_ROOT/cache/task_queue"
 
 echo "[SimUser Val] dataset=$DATASET $LOAD_DESCRIPTION val_batch=256 gpus=$N_GPUS ulysses=$ULYSSES_SEQUENCE_PARALLEL_SIZE"
 echo "[SimUser Val] nonanswer=$ALLOW_NONANSWER_ACTION clarify=$SIMULATED_USER_ALLOW_CLARIFY queries/tool=$MAX_SEARCH_QUERIES topk=$SEARCH_TOP_K"
-echo "[SimUser Val] feedback=$SIMULATED_USER_ENABLE_FEEDBACK static_gold_context=$SIMULATED_USER_STATIC_GOLD_CONTEXT"
+echo "[SimUser Val] feedback=$SIMULATED_USER_ENABLE_FEEDBACK satisfaction_assessment=$SIMULATED_USER_ASSESS_SATISFACTION static_gold_context=$SIMULATED_USER_STATIC_GOLD_CONTEXT"
 
 python -u -m verl.trainer.main_ppo \
   "data.train_files=$TRAIN_FILE" \
@@ -176,6 +177,7 @@ python -u -m verl.trainer.main_ppo \
   "algorithm.query_group_advantage=disabled" \
   "algorithm.simulated_user_enabled=true" \
   "algorithm.simulated_user_enable_feedback=$SIMULATED_USER_ENABLE_FEEDBACK" \
+  "algorithm.simulated_user_assess_satisfaction=$SIMULATED_USER_ASSESS_SATISFACTION" \
   "algorithm.simulated_user_static_gold_context=$SIMULATED_USER_STATIC_GOLD_CONTEXT" \
   "algorithm.simulated_user_mode=openai" \
   "algorithm.allow_nonanswer_action=$ALLOW_NONANSWER_ACTION" \

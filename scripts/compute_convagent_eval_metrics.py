@@ -299,6 +299,9 @@ def main() -> None:
                 "simulator_level": row.get("simulator_level"),
                 "simulator_status": as_text(row.get("simulator_status", "")),
                 "simulator_feedback_enabled": bool(row.get("simulator_feedback_enabled", False)),
+                "simulator_satisfaction_assessed": bool(
+                    row.get("simulator_satisfaction_assessed", row.get("simulator_feedback_enabled", False))
+                ),
                 "simulator_judgement_count": as_float(row.get("simulator_judgement_count")) or 0.0,
                 "simulator_fallback_count": as_float(row.get("simulator_fallback_count")) or 0.0,
                 "retry_depth": as_float(row.get("retry_depth")),
@@ -334,6 +337,10 @@ def main() -> None:
     if simulated_user_records:
         feedback_enabled = any(
             bool(record["simulator_feedback_enabled"]) for record in simulated_user_records
+        )
+        satisfaction_assessed = any(
+            bool(record["simulator_satisfaction_assessed"])
+            for record in simulated_user_records
         )
         available_batch_indices = {
             int(record["validation_batch_index"])
@@ -376,27 +383,26 @@ def main() -> None:
             **({"batches_evaluated": batches_evaluated} if batches_evaluated is not None else {}),
             **({"validation_truncated": validation_truncated} if validation_truncated is not None else {}),
         }
-        if feedback_enabled:
+        if satisfaction_assessed:
+            satisfaction_rate = fmean(
+                record["simulator_level"] == 1 for record in answer_labeled
+            ) if answer_labeled else 0.0
             online_metrics.update(
                 {
-                    "level_1_rate": fmean(
-                        record["simulator_level"] == 1 for record in answer_labeled
-                    )
-                    if answer_labeled
-                    else 0.0,
+                    "level_1_rate": satisfaction_rate,
+                    "user_satisfaction_rate": satisfaction_rate,
                     "simulator_fallback_rate": (
                         sum(record["simulator_fallback_count"] for record in simulated_user_records)
                         / sum(record["simulator_judgement_count"] for record in simulated_user_records)
                         if sum(record["simulator_judgement_count"] for record in simulated_user_records)
                         else 0.0
                     ),
-                    "mean_retry_depth": fmean(
-                        record["retry_depth"] for record in answer_labeled
-                    )
-                    if answer_labeled
-                    else 0.0,
                 }
             )
+            if feedback_enabled:
+                online_metrics["mean_retry_depth"] = fmean(
+                    record["retry_depth"] for record in answer_labeled
+                ) if answer_labeled else 0.0
 
     metric_definitions = {
         "f1": "Answer-only token-set F1 of the terminal valid <answer>, otherwise the last valid answer in the same sub-task; no valid answer is 0.",
@@ -414,13 +420,17 @@ def main() -> None:
                 "validation_truncated": "1.0 when validation was intentionally capped for a smoke test, otherwise 0.0.",
             }
         )
-        if any(bool(record["simulator_feedback_enabled"]) for record in simulated_user_records):
+        if any(bool(record["simulator_satisfaction_assessed"]) for record in simulated_user_records):
             metric_definitions.update(
                 {
-                    "level_1_rate": "Among answer-labelled sub-tasks, fraction whose terminal simulator assessment is level 1 (satisfied).",
+                    "level_1_rate": "Legacy alias of user_satisfaction_rate.",
+                    "user_satisfaction_rate": "Among answer-labelled sub-tasks, fraction whose terminal simulator assessment is level 1 (satisfied).",
                     "simulator_fallback_rate": "Among answer-labelled sub-tasks with a simulator judgement, fraction using the conservative fallback after two failed simulator calls.",
-                    "mean_retry_depth": "Mean terminal response depth among answer-labelled simulated-user sub-tasks; depth 1 means no retry.",
                 }
+            )
+        if any(bool(record["simulator_feedback_enabled"]) for record in simulated_user_records):
+            metric_definitions["mean_retry_depth"] = (
+                "Mean terminal response depth among answer-labelled simulated-user sub-tasks; depth 1 means no retry."
             )
 
     summary = {

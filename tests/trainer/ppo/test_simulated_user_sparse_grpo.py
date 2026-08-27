@@ -1,4 +1,6 @@
 import numpy as np
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -358,6 +360,83 @@ def test_static_gold_context_uses_source_prefix_and_never_carries_sampled_answer
         {"role": "assistant", "content": "gold0"},
         {"role": "user", "content": "q1"},
     ]
+
+
+def test_no_feedback_keeps_sampled_answer_in_dynamic_context_not_gold_prefix():
+    """The w/o-feedback ablation must not silently become static-context."""
+    manager = object.__new__(SimulatedUserGenerationManager)
+    manager.system_prompt = "system contract"
+    manager.settings = SimulatedUserSettings(
+        enable_user_feedback=False,
+        assess_user_satisfaction=False,
+        use_static_gold_context=False,
+    )
+    dialogue = {
+        "dialogue_id": "d0",
+        "subtasks": [
+            {"question": "q0", "expected_action": "answer", "gold_response": "gold0"},
+            {"question": "q1", "expected_action": "answer", "gold_response": "gold1"},
+        ],
+    }
+    state = manager._new_state(rollout_index=0, dialogue=dialogue)
+    manager._append_public_assistant_message(state, "sampled but imperfect answer")
+    manager._move_to_next_subtask(state)
+
+    assert state.subtask_index == 1
+    assert state.messages == [
+        {"role": "system", "content": "system contract"},
+        {"role": "user", "content": "q0"},
+        {"role": "assistant", "content": "sampled but imperfect answer"},
+        {"role": "user", "content": "q1"},
+    ]
+    assert all(message["content"] != "gold0" for message in state.messages)
+
+
+def test_no_feedback_validation_assesses_satisfaction_once_without_retry_or_reward():
+    """Assessment-only validation must remain invisible to the policy loop."""
+    manager = object.__new__(SimulatedUserGenerationManager)
+    manager.system_prompt = "system contract"
+    manager.settings = SimulatedUserSettings(
+        enable_user_feedback=False,
+        assess_user_satisfaction=True,
+        use_static_gold_context=False,
+    )
+    simulator_calls = []
+
+    class _Simulator:
+        def judge_answer(self, **kwargs):
+            simulator_calls.append(kwargs)
+            return SimpleNamespace(level=2, feedback="Please define the key term.", source="simulator")
+
+    manager.simulator = _Simulator()
+    manager._public_transcript = lambda _state: "User: q0"
+    manager._truncate_simulator_text = lambda value, _cap, *, keep_tail: str(value)
+    dialogue = {
+        "dialogue_id": "d0",
+        "subtasks": [
+            {"question": "q0", "expected_action": "answer", "gold_response": "gold0"},
+            {"question": "q1", "expected_action": "answer", "gold_response": "gold1"},
+        ],
+    }
+    state = manager._new_state(rollout_index=0, dialogue=dialogue)
+    event = _Event(
+        subtask_index=0,
+        response_depth=1,
+        action="answer",
+        raw_response="<think>x</think><answer>candidate</answer>",
+    )
+
+    manager._handle_judgement(state, event, "candidate")
+
+    assert len(simulator_calls) == 1
+    assert event.simulator_level == 2
+    assert event.simulator_feedback == "Please define the key term."
+    assert event.components == {}
+    assert state.answer_depth == 1
+    assert state.subtask_index == 1
+    assert all("User feedback:" not in str(message["content"]) for message in state.messages)
+    assert state.messages[-2] == {"role": "assistant", "content": "candidate"}
+    assert state.messages[-1] == {"role": "user", "content": "q1"}
 
 
 def test_text_metrics_fall_back_to_last_valid_answer_but_not_first_or_oracle_best():

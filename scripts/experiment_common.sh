@@ -37,6 +37,9 @@ export MAX_ANSWER_DEPTH="${MAX_ANSWER_DEPTH:-3}"
 # and efficiency shaping are deliberately off in the canonical paper recipe.
 export SIMULATED_USER_REWARD_MODE="${SIMULATED_USER_REWARD_MODE:-full}"
 export SIMULATED_USER_ENABLE_FEEDBACK="${SIMULATED_USER_ENABLE_FEEDBACK:-true}"
+# Validation-only hidden satisfaction assessment.  It is useful for the
+# no-feedback ablation, but cannot affect training trajectories or rewards.
+export SIMULATED_USER_ASSESS_SATISFACTION="${SIMULATED_USER_ASSESS_SATISFACTION:-false}"
 export SIMULATED_USER_STATIC_GOLD_CONTEXT="${SIMULATED_USER_STATIC_GOLD_CONTEXT:-false}"
 export SIMULATED_USER_ENABLE_EVIDENCE_UTILITY="${SIMULATED_USER_ENABLE_EVIDENCE_UTILITY:-false}"
 export SIMULATED_USER_ENABLE_SEARCH_EFFICIENCY="${SIMULATED_USER_ENABLE_SEARCH_EFFICIENCY:-false}"

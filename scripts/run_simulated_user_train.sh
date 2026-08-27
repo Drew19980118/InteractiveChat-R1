@@ -49,6 +49,7 @@ SEARCH_TOP_K="${SEARCH_TOP_K:-3}"
 MAX_ANSWER_DEPTH="${MAX_ANSWER_DEPTH:-3}"
 SIMULATED_USER_REWARD_MODE="${SIMULATED_USER_REWARD_MODE:-full}"
 SIMULATED_USER_ENABLE_FEEDBACK="${SIMULATED_USER_ENABLE_FEEDBACK:-true}"
+SIMULATED_USER_ASSESS_SATISFACTION="${SIMULATED_USER_ASSESS_SATISFACTION:-false}"
 SIMULATED_USER_STATIC_GOLD_CONTEXT="${SIMULATED_USER_STATIC_GOLD_CONTEXT:-false}"
 SIMULATED_USER_ENABLE_EVIDENCE_UTILITY="${SIMULATED_USER_ENABLE_EVIDENCE_UTILITY:-false}"
 SIMULATED_USER_ENABLE_SEARCH_EFFICIENCY="${SIMULATED_USER_ENABLE_SEARCH_EFFICIENCY:-false}"
@@ -121,6 +122,7 @@ if [[ "$SIMULATED_USER_REWARD_MODE" != "full" \
 fi
 for boolean_name in \
   SIMULATED_USER_ENABLE_FEEDBACK \
+  SIMULATED_USER_ASSESS_SATISFACTION \
   SIMULATED_USER_STATIC_GOLD_CONTEXT \
   SIMULATED_USER_ENABLE_EVIDENCE_UTILITY \
   SIMULATED_USER_ENABLE_SEARCH_EFFICIENCY; do
@@ -130,7 +132,7 @@ for boolean_name in \
     exit 2
   fi
 done
-if [[ "$SIMULATED_USER_ENABLE_FEEDBACK" == "true" ]]; then
+if [[ "$SIMULATED_USER_ENABLE_FEEDBACK" == "true" || "$SIMULATED_USER_ASSESS_SATISFACTION" == "true" ]]; then
   : "${USER_SIMULATOR_BASE_URL:?Example: http://127.0.0.1:8010}"
   : "${USER_SIMULATOR_MODEL:?Set the served Qwen32B user-simulator name.}"
 fi
@@ -187,7 +189,7 @@ fi
 
 echo "[SimUser Train] dataset=$DATASET experiment=$EXPERIMENT_NAME reward_mode=$SIMULATED_USER_REWARD_MODE steps=$TOTAL_STEPS batch=128 n=8 val_batch=256 gpus=$N_GPUS ulysses=$ULYSSES_SEQUENCE_PARALLEL_SIZE"
 echo "[SimUser Train] nonanswer=$ALLOW_NONANSWER_ACTION clarify=$SIMULATED_USER_ALLOW_CLARIFY queries/tool=$MAX_SEARCH_QUERIES topk=$SEARCH_TOP_K"
-echo "[SimUser Train] feedback=$SIMULATED_USER_ENABLE_FEEDBACK static_gold_context=$SIMULATED_USER_STATIC_GOLD_CONTEXT evidence_utility=$SIMULATED_USER_ENABLE_EVIDENCE_UTILITY search_efficiency=$SIMULATED_USER_ENABLE_SEARCH_EFFICIENCY"
+echo "[SimUser Train] feedback=$SIMULATED_USER_ENABLE_FEEDBACK satisfaction_assessment=$SIMULATED_USER_ASSESS_SATISFACTION static_gold_context=$SIMULATED_USER_STATIC_GOLD_CONTEXT evidence_utility=$SIMULATED_USER_ENABLE_EVIDENCE_UTILITY search_efficiency=$SIMULATED_USER_ENABLE_SEARCH_EFFICIENCY"
 if [[ -n "$SIMULATED_USER_VALIDATION_MAX_BATCHES" ]]; then
   echo "[SimUser Train] validation smoke cap: $SIMULATED_USER_VALIDATION_MAX_BATCHES packed batches"
 fi
@@ -235,6 +237,7 @@ python -u -m verl.trainer.main_ppo \
   "algorithm.simulated_user_enabled=true" \
   "algorithm.simulated_user_reward_mode=$SIMULATED_USER_REWARD_MODE" \
   "algorithm.simulated_user_enable_feedback=$SIMULATED_USER_ENABLE_FEEDBACK" \
+  "algorithm.simulated_user_assess_satisfaction=$SIMULATED_USER_ASSESS_SATISFACTION" \
   "algorithm.simulated_user_static_gold_context=$SIMULATED_USER_STATIC_GOLD_CONTEXT" \
   "algorithm.simulated_user_enable_evidence_utility=$SIMULATED_USER_ENABLE_EVIDENCE_UTILITY" \
   "algorithm.simulated_user_enable_search_efficiency=$SIMULATED_USER_ENABLE_SEARCH_EFFICIENCY" \

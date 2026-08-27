@@ -70,6 +70,8 @@ InteractiveChat-R1/
 │   ├── run_local_retriever_server.sh     # FAISS /retrieve service
 │   ├── run_user_simulator_server.sh      # frozen Qwen32B OpenAI-compatible server
 │   ├── run_{inscit,qrecc}_{3b,7b}_full_train.sh
+│   ├── run_inscit_3b_{wo_satisfaction_reward,wo_user_feedback,wo_patience_penalty}_train.sh
+│   ├── run_inscit_3b_ablation_suite.sh
 │   ├── run_{inscit,qrecc}_{3b,7b}_full_val.sh
 │   ├── run_topiocqa_from_inscit_*_full_val.sh
 │   └── run_coral_from_qrecc_*_full_val.sh
@@ -485,11 +487,24 @@ tail -f logs/interactivechat_r1_qrecc_7b_full_train.log
 
 Each run automatically performs the full online test after the final step and then computes F1, BERTScore, NDCG@3, action accuracy (where applicable), format success rate, user satisfaction, simulator fallback rate, mean retry depth, and mean tool calls.
 
-### Controlled ablations
+### User-centric ablations
 
-The static-context/no-feedback study starts every sub-task from the canonical
-dialogue prefix and uses no simulator feedback or retry. It retains answer-F1,
-action, format, and clarification-F1 rewards:
+The following ablations keep the same InsCiT-3B optimization setting (15
+steps, 128 contexts/update, 8 GRPO siblings, and final full online validation)
+as the full method.  In every case, answer-F1, action, format, and
+clarification-F1 remain active.
+
+| Ablation | Interaction retained during training | Disabled reward | Online validation report |
+|---|---|---|---|
+| `w/o satisfaction reward` | user feedback and answer-only retries | clarity and patience | satisfaction rate, retry depth |
+| `w/o user feedback` | dynamic model-generated context and fallback only; no feedback/retry | clarity and patience | one hidden, non-interactive simulator judgement per answer; satisfaction rate only |
+| `w/o patience penalty` | user feedback and answer-only retries | patience only | satisfaction rate, retry depth |
+
+In particular, **w/o user feedback is not a static-gold-prefix baseline**:
+sub-task \(t+1\) still receives the policy's public answer from \(t\), or the
+environmental gold fallback after an invalid/wrong terminal action.  The hidden
+validation judgement is never appended to the dialogue, never produces a
+reward, and never triggers retry.
 
 ```bash
 mkdir -p logs
@@ -497,15 +512,18 @@ mkdir -p logs
 nohup env \
   CUDA_VISIBLE_DEVICES=2,3 \
   N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
-  bash scripts/run_inscit_3b_static_no_feedback_train.sh \
-  > logs/interactivechat_r1_inscit_3b_static_no_feedback_train.log 2>&1 &
+  USER_SIMULATOR_BASE_URL=http://127.0.0.1:8010 \
+  USER_SIMULATOR_MODEL=qwen32b-user-simulator \
+  INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
+  bash scripts/run_inscit_3b_ablation_suite.sh \
+  > logs/interactivechat_r1_inscit_3b_ablation_suite.log 2>&1 &
 
-tail -f logs/interactivechat_r1_inscit_3b_static_no_feedback_train.log
+tail -f logs/interactivechat_r1_inscit_3b_ablation_suite.log
 ```
 
-The canonical full method uses online, model-generated dialogue context and
-simulator feedback; this control removes both while retaining the same
-answer-correctness, action, and format supervision.
+The three runs write independent checkpoints, rollout traces, validation JSONL
+files, and `metrics_summary.json` files beneath `outputs/inscit/` and
+`eval_log/inscit/`, using the respective experiment names from their launcher.
 
 ### Resume an interrupted run
 
@@ -570,8 +588,8 @@ Metric semantics:
 - **NDCG@3:** retrieval after every valid tool call is logged, and the final per-subtask top-3 is evaluated.  QReCC/CoRAL/InsCiT use passage IDs; TopiOCQA uses normalized passage text because its source and retrieval IDs differ.
 - **Action accuracy:** exact expected terminal action among action-labelled data (`answer`, and optionally `clarify`/`nonanswer`).
 - **Format success rate:** fraction of sub-tasks whose terminal event passes the strict XML parser.
-- **User satisfaction:** formerly `level_1_rate`; among answer-labelled sub-tasks, fraction whose final simulator judgement is level 1 (the user is satisfied).
-- **Mean retry depth / mean tool calls:** average number of answer attempts and valid executed searches per source sub-task.
+- **User satisfaction rate:** fraction of answer-labelled sub-tasks whose final simulator judgement is level 1 (the user is satisfied).  `level_1_rate` is retained as a backwards-compatible alias.  The no-feedback ablation obtains this with one hidden evaluator judgement only; it never receives user feedback or retry.
+- **Mean retry depth / mean tool calls:** average number of answer attempts and valid executed searches per source sub-task. Mean retry depth is intentionally absent for the no-feedback ablation.
 
 To recompute a metric summary for any existing trace:
 

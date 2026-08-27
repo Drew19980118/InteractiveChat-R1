@@ -87,11 +87,17 @@ class SimulatedUserSettings:
     # method. Keep their switches only for archived experimental configs.
     enable_evidence_utility: bool = False
     enable_search_efficiency: bool = False
-    # When disabled, a correct answer advances immediately: no remote user
-    # simulator call, no clarity/patience reward, and no answer retry.  The
-    # static-context ablation additionally resets each sub-task to its source
-    # gold dialogue prefix.
+    # When disabled, a correct answer advances immediately: no user feedback,
+    # no clarity/patience reward, and no answer retry.  It does *not* imply
+    # static gold context: later source sub-tasks still condition on the
+    # policy's public answer (or an environmental gold fallback).
     enable_user_feedback: bool = True
+    # Evaluation-only user-satisfaction probe.  It asks the frozen simulator
+    # for one level-1/2/3 judgement but never exposes that feedback to the
+    # policy and never creates a reward channel or retry.  This supports the
+    # ``w/o user feedback`` ablation without turning it into a gold-prefix
+    # control.
+    assess_user_satisfaction: bool = False
     use_static_gold_context: bool = False
     max_tool_calls: int = 4
     max_search_queries: int = 1
@@ -239,7 +245,7 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
             if int(getattr(settings, name)) < 1:
                 raise ValueError(f"{name} must be >= 1")
         self.simulator: Optional[UserSimulatorClient] = None
-        if settings.enable_user_feedback:
+        if settings.enable_user_feedback or settings.assess_user_satisfaction:
             self.simulator = UserSimulatorClient(
                 base_url=settings.simulator_base_url,
                 model=settings.simulator_model,
@@ -786,17 +792,16 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
             pending_judgements.append((state, event, action.content))
             return
 
-    def _handle_judgement(self, state: _State, event: _Event, answer: str) -> None:
-        if not self.settings.enable_user_feedback:
-            # This is the static-gold-context ablation: an answer gets exactly
-            # one user-facing attempt and then the environment moves directly
-            # to the next source sub-task.  No simulator-derived reward or
-            # feedback text is produced.
-            self._append_public_assistant_message(state, answer)
-            self._move_to_next_subtask(state)
-            return
+    def _judge_answer(self, state: _State, event: _Event, answer: str) -> Any:
+        """Attach one privacy-bounded simulator judgement to ``event``.
+
+        The caller decides whether the judgement is interactive (feedback and
+        retry) or evaluation-only.  In both cases the simulator sees the same
+        public projection *before* the candidate answer is appended, never the
+        policy's private reasoning/tool trace.
+        """
         if self.simulator is None:
-            raise RuntimeError("simulated-user feedback is enabled but no simulator client was created")
+            raise RuntimeError("simulated-user judgement was requested but no simulator client was created")
         subtask = state.subtask
         public_transcript = self._public_transcript(state)
         judgement = self.simulator.judge_answer(
@@ -814,6 +819,23 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
         event.simulator_feedback = judgement.feedback
         event.simulator_status = judgement.source
         event.simulator_public_transcript = public_transcript
+        return judgement
+
+    def _handle_judgement(self, state: _State, event: _Event, answer: str) -> None:
+        if not self.settings.enable_user_feedback:
+            # ``w/o user feedback`` remains an online dynamic-context
+            # environment: the next sub-task sees this sampled public answer
+            # (or a later fallback), not the source-data gold prefix.  During
+            # validation we may still run one hidden satisfaction assessment
+            # for reporting, but it is never appended as feedback and never
+            # contributes a reward or retry.
+            if self.settings.assess_user_satisfaction:
+                self._judge_answer(state, event, answer)
+            self._append_public_assistant_message(state, answer)
+            self._move_to_next_subtask(state)
+            return
+
+        judgement = self._judge_answer(state, event, answer)
         # The user has now seen this answer.  Future clarity judgements and
         # retry turns retain only this public answer, never its think/tool
         # trace or retrieved passages.
