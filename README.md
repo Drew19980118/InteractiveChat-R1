@@ -419,44 +419,68 @@ together: `CUDA_VISIBLE_DEVICES`, `N_GPUS`, and
 
 ```bash
 # Qwen2.5-3B
+mkdir -p logs
+
+nohup env \
 CUDA_VISIBLE_DEVICES=2,3 \
 N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
 USER_SIMULATOR_BASE_URL=http://127.0.0.1:8010 \
 USER_SIMULATOR_MODEL=qwen32b-user-simulator \
 INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
-bash scripts/run_inscit_3b_full_train.sh
+bash scripts/run_inscit_3b_full_train.sh \
+  > logs/interactivechat_r1_inscit_3b_full_train.log 2>&1 &
+
+tail -f logs/interactivechat_r1_inscit_3b_full_train.log
 ```
 
 ```bash
 # Qwen2.5-7B
+mkdir -p logs
+
+nohup env \
 CUDA_VISIBLE_DEVICES=2,3 \
 N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
 USER_SIMULATOR_BASE_URL=http://127.0.0.1:8010 \
 USER_SIMULATOR_MODEL=qwen32b-user-simulator \
 INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
-bash scripts/run_inscit_7b_full_train.sh
+bash scripts/run_inscit_7b_full_train.sh \
+  > logs/interactivechat_r1_inscit_7b_full_train.log 2>&1 &
+
+tail -f logs/interactivechat_r1_inscit_7b_full_train.log
 ```
 
 ### QReCC: train and final online validation
 
 ```bash
 # Qwen2.5-3B
+mkdir -p logs
+
+nohup env \
 CUDA_VISIBLE_DEVICES=2,3 \
 N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
 USER_SIMULATOR_BASE_URL=http://127.0.0.1:8010 \
 USER_SIMULATOR_MODEL=qwen32b-user-simulator \
 INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
-bash scripts/run_qrecc_3b_full_train.sh
+bash scripts/run_qrecc_3b_full_train.sh \
+  > logs/interactivechat_r1_qrecc_3b_full_train.log 2>&1 &
+
+tail -f logs/interactivechat_r1_qrecc_3b_full_train.log
 ```
 
 ```bash
 # Qwen2.5-7B
+mkdir -p logs
+
+nohup env \
 CUDA_VISIBLE_DEVICES=2,3 \
 N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
 USER_SIMULATOR_BASE_URL=http://127.0.0.1:8010 \
 USER_SIMULATOR_MODEL=qwen32b-user-simulator \
 INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
-bash scripts/run_qrecc_7b_full_train.sh
+bash scripts/run_qrecc_7b_full_train.sh \
+  > logs/interactivechat_r1_qrecc_7b_full_train.log 2>&1 &
+
+tail -f logs/interactivechat_r1_qrecc_7b_full_train.log
 ```
 
 Each run automatically performs the full online test after the final step and then computes F1, BERTScore, NDCG@3, action accuracy (where applicable), format success rate, user satisfaction, simulator fallback rate, mean retry depth, and mean tool calls.
@@ -468,8 +492,15 @@ dialogue prefix and uses no simulator feedback or retry. It retains answer-F1,
 action, format, and clarification-F1 rewards:
 
 ```bash
-CUDA_VISIBLE_DEVICES=2,3 N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
-bash scripts/run_inscit_3b_static_no_feedback_train.sh
+mkdir -p logs
+
+nohup env \
+  CUDA_VISIBLE_DEVICES=2,3 \
+  N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
+  bash scripts/run_inscit_3b_static_no_feedback_train.sh \
+  > logs/interactivechat_r1_inscit_3b_static_no_feedback_train.log 2>&1 &
+
+tail -f logs/interactivechat_r1_inscit_3b_static_no_feedback_train.log
 ```
 
 The canonical full method uses online, model-generated dialogue context and
@@ -481,13 +512,20 @@ answer-correctness, action, and format supervision.
 The checkpoint `global_step_9` means the completed updates are 0–9.  Resume to a total of 15 steps as follows:
 
 ```bash
-CUDA_VISIBLE_DEVICES=2,3 N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
-USER_SIMULATOR_BASE_URL=http://127.0.0.1:8010 \
-USER_SIMULATOR_MODEL=qwen32b-user-simulator \
-RESUME_MODE=resume_path \
-RESUME_FROM_PATH=$PWD/outputs/inscit/interactivechat_r1_inscit_3b_full_f1_satisfaction_15steps/global_step_9 \
-TOTAL_STEPS=15 \
-bash scripts/run_inscit_3b_full_train.sh
+mkdir -p logs
+
+nohup env \
+  CUDA_VISIBLE_DEVICES=2,3 \
+  N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
+  USER_SIMULATOR_BASE_URL=http://127.0.0.1:8010 \
+  USER_SIMULATOR_MODEL=qwen32b-user-simulator \
+  RESUME_MODE=resume_path \
+  RESUME_FROM_PATH=$PWD/outputs/inscit/interactivechat_r1_inscit_3b_full_f1_satisfaction_15steps/global_step_9 \
+  TOTAL_STEPS=15 \
+  bash scripts/run_inscit_3b_full_train.sh \
+  > logs/interactivechat_r1_inscit_3b_full_resume.log 2>&1 &
+
+tail -f logs/interactivechat_r1_inscit_3b_full_resume.log
 ```
 
 ## Online evaluation
