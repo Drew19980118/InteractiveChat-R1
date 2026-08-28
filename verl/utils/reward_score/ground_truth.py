@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from .static_convagent import static_convagent_allowed_actions, static_convagent_answer_and_passage_ids
+from .static_chatr1 import static_chatr1_primary_answer_and_passage_ids, static_chatr1_reference_string
 
 
 def _normalize_passage_ids(value: Any) -> list[str]:
@@ -178,3 +179,27 @@ def select_static_convagent_answer_ground_truth_with_passage_ids(
 def select_static_convagent_expected_actions(ground_truth: Any, data_source: Any = None) -> set[str]:
     """Return the permissible static ConvAgent terminal actions for one row."""
     return static_convagent_allowed_actions(ground_truth, data_source=data_source)
+
+
+def select_static_chatr1_primary_answer_ground_truth_with_passage_ids(
+    ground_truth: Any,
+    data_source: Any = None,
+) -> tuple[str, list[str]]:
+    """Return ChatR1's primary answer plus every answer-candidate passage.
+
+    ``data_source`` is accepted for parity with the other selectors.  ChatR1's
+    released rows are already answer-only, so no dataset-specific action
+    filtering is needed here.
+    """
+    del data_source
+    return static_chatr1_primary_answer_and_passage_ids(ground_truth)
+
+
+def select_static_chatr1_answer_ground_truth_with_passage_ids(
+    ground_truth: Any,
+    data_source: Any = None,
+) -> tuple[str, list[str]]:
+    """Return all ChatR1 answer references and the union of gold passages."""
+    del data_source
+    _primary_answer, passage_ids = static_chatr1_primary_answer_and_passage_ids(ground_truth)
+    return static_chatr1_reference_string(ground_truth), passage_ids

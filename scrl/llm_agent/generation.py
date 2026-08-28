@@ -30,8 +30,10 @@ from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.utils.torch_functional import get_response_mask, pad_2d_list_to_length
 from verl.utils.reward_score.ground_truth import (
     select_answer_ground_truth,
+    select_static_chatr1_primary_answer_ground_truth_with_passage_ids,
     select_static_convagent_answer_ground_truth_with_passage_ids,
 )
+from verl.utils.reward_score.static_chatr1 import static_chatr1_intent_rewards, static_chatr1_rewrite
 from verl.utils.reward_score.static_convagent import direct_evidence_coverage
 import numpy as np
 import traceback
@@ -84,6 +86,11 @@ class GenerationConfig:
     # Direct passage coverage reward used by the static ConvAgent baseline.
     static_convagent_direct_evidence_reward: bool = False
     static_convagent_short_answer_tokens: int = 4
+    # Static ChatR1 uses the same released <search>/<information> grammar but
+    # its intermediate signal is query--human-rewrite F1, not evidence
+    # coverage or frozen-model information gain.
+    static_chatr1_mode: bool = False
+    static_chatr1_intent_reward: bool = False
     
 
 class LLMGenerationManager:
@@ -99,10 +106,13 @@ class LLMGenerationManager:
         self.actor_rollout_wg = actor_rollout_wg
         self.config = config
         self.is_validation = is_validation
+        if config.static_convagent_mode and config.static_chatr1_mode:
+            raise ValueError("static_convagent_mode and static_chatr1_mode are mutually exclusive")
+        self.static_search_mode = bool(config.static_convagent_mode or config.static_chatr1_mode)
         # ConvAgent's static Parquet contains the complete task instruction,
         # including the <search> / <information> protocol. Do not prepend the
         # InteractiveChat-R1 tool-call prompt in this mode.
-        self.system_prompt = "" if config.static_convagent_mode else (config.system_prompt or "")
+        self.system_prompt = "" if self.static_search_mode else (config.system_prompt or "")
         if config.allow_nonanswer:
             # The base prompt says there are two forms. This appended instruction
             # deliberately overrides that wording only for action-labelled data.
@@ -475,8 +485,12 @@ class LLMGenerationManager:
             has_search = "<search>" in content or "</search>" in content
             has_clarify = "<clarify>" in content or "</clarify>" in content
             action_flags = (has_answer, has_nonanswer, has_tool_call)
-            if self.config.static_convagent_mode:
-                action_flags = (has_answer, has_nonanswer, has_search, has_clarify)
+            if self.static_search_mode:
+                action_flags = (
+                    (has_answer, has_nonanswer, has_search, has_clarify)
+                    if self.config.static_convagent_mode
+                    else (has_answer, has_nonanswer, has_search)
+                )
 
             # A response may contain exactly one action form. In particular,
             # answer/nonanswer cannot be combined in one terminal turn.
@@ -513,7 +527,7 @@ class LLMGenerationManager:
                     results.append((True, "", ""))
                 else:
                     results.append((True, think_content, ""))
-            elif has_search and self.config.static_convagent_mode:
+            elif has_search and self.static_search_mode:
                 if "<search>" not in content or "</search>" not in content:
                     results.append((True, "", ""))
                     continue
@@ -744,12 +758,28 @@ class LLMGenerationManager:
         
         messages_list = []
         agent_grpo_idx = []
+        # The reward manager later consumes the original nested candidate
+        # labels.  Generation needs a flattened primary answer only for its
+        # legacy pseudo-logprob plumbing, so never mutate DataProto metadata
+        # in place.
+        ground_truths = copy.deepcopy(ground_truths)
         for gt in ground_truths:
             # ConvAgent stores a list of {action, response, passage_id, ...}
             # candidates.  IGPO uses the first answer candidate; samples with
             # no answer candidate deliberately have an empty target and receive
             # no outcome or information-gain reward.
-            if self.config.static_convagent_mode:
+            if self.config.static_chatr1_mode:
+                # Preserve the human rewrite before replacing the nested
+                # candidate list with one primary answer for legacy pseudo
+                # log-prob plumbing.  The outcome scorer itself still sees
+                # the original reward model and evaluates max-F1 over every
+                # reference candidate.
+                raw_ground_truth = gt.get('ground_truth', '')
+                gt['_static_chatr1_rewrite'] = static_chatr1_rewrite(raw_ground_truth)
+                gt['ground_truth'] = select_static_chatr1_primary_answer_ground_truth_with_passage_ids(
+                    raw_ground_truth
+                )[0]
+            elif self.config.static_convagent_mode:
                 gt['ground_truth'] = select_static_convagent_answer_ground_truth_with_passage_ids(
                     gt.get('ground_truth', '')
                 )[0]
@@ -893,6 +923,9 @@ class LLMGenerationManager:
         # known as soon as a search has executed. It replaces legacy frozen
         # likelihood-difference IG after the rollout is serialized.
         direct_evidence_rewards = [[] for _ in range(len(messages_list))]
+        # Populated after rollout completion.  ChatR1 defines a trace-level
+        # max query--rewrite F1; we credit the maximizing valid search action.
+        static_chatr1_query_rewards = [[] for _ in range(len(messages_list))]
         first_retrieved_passages = [[] for _ in range(len(messages_list))]
         # One entry per completed tool action. ``None`` deliberately marks an
         # invalid/non-search action so positional alignment is never silently
@@ -1306,7 +1339,7 @@ class LLMGenerationManager:
                 escaped_observation = self._escape_tool_observation(
                     tool_call_list[i].get("content", "")
                 )
-                if self.config.static_convagent_mode:
+                if self.static_search_mode:
                     query = self._canonicalize_search_action(
                         tool_call_list[i].get("tool_call", {})
                     ) or ""
@@ -1663,6 +1696,27 @@ class LLMGenerationManager:
             print(
                 "[StaticConvAgent] direct evidence rewards: "
                 f"{sum(len(rewards) for rewards in direct_evidence_rewards)} search actions",
+                flush=True,
+            )
+
+        if self.config.static_chatr1_intent_reward:
+            static_chatr1_query_rewards = [
+                static_chatr1_intent_rewards(
+                    queries,
+                    str(ground_truths_rolling[index].get('_static_chatr1_rewrite', '') or ''),
+                )
+                for index, queries in enumerate(tool_action_queries)
+            ]
+            info_gain_rewards = static_chatr1_query_rewards
+            info_gain_query_eligible = [
+                [True] * len(rewards) for rewards in static_chatr1_query_rewards
+            ]
+            rewrite_bound_rewards = [
+                [None] * len(rewards) for rewards in static_chatr1_query_rewards
+            ]
+            print(
+                "[StaticChatR1] intent rewards: "
+                f"{sum(len(rewards) for rewards in static_chatr1_query_rewards)} search actions",
                 flush=True,
             )
 

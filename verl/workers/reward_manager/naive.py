@@ -36,6 +36,7 @@ class NaiveRewardManager:
         reward_fn_key="data_source",
         use_action_reward: bool = False,
         static_convagent_mode: bool = False,
+        static_chatr1_mode: bool = False,
         action_incorrect_reward: float = -1.0,
     ) -> None:
         self.tokenizer = tokenizer
@@ -46,6 +47,7 @@ class NaiveRewardManager:
         # baseline IGPO and Rewrite-Bound enable it for a fair comparison.
         self.use_action_reward = use_action_reward
         self.static_convagent_mode = static_convagent_mode
+        self.static_chatr1_mode = static_chatr1_mode
         self.action_incorrect_reward = float(action_incorrect_reward)
 
     def __call__(self, data: DataProto, return_dict=False, val_type='f1', info_gain_rewards=None, is_validation=False):
@@ -111,6 +113,17 @@ class NaiveRewardManager:
                     if expected_action:
                         action_correct = bool(format_valid and predicted_action in expected_action)
                         action_reward = 1.0 if action_correct else self.action_incorrect_reward
+                elif self.static_chatr1_mode:
+                    # ChatR1 released only answerable static turns.  This is
+                    # reporting-only when callers enable it; its paper-style
+                    # objective itself remains answer-F1 + rewrite reward.
+                    expected_action = ["answer"]
+                    predicted_action, format_valid = extract_terminal_action(
+                        response_str,
+                        allow_search=True,
+                    )
+                    action_correct = bool(format_valid and predicted_action == "answer")
+                    action_reward = 1.0 if action_correct else self.action_incorrect_reward
                 else:
                     expected_action = select_expected_action(reward_model, data_source=data_source)
                     predicted_action, format_valid = extract_terminal_action(response_str)
@@ -137,6 +150,7 @@ class NaiveRewardManager:
                 tokenizer=self.tokenizer,
                 is_validation=is_validation,
                 static_convagent_mode=self.static_convagent_mode,
+                static_chatr1_mode=self.static_chatr1_mode,
             )
 
             if is_validation:

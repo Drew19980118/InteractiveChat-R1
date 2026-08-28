@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Create a conversation-disjoint train/monitor split for static ConvAgent data.
+"""Create a conversation-disjoint train/monitor split for static agent data.
 
-The input is the original static ConvAgent Parquet.  It is not an online
+The input is the original static baseline Parquet.  It is not an online
 benchmark conversion: prompts and labels are copied verbatim.  The split key
 is a stable hash of the first user message in the gold conversation history,
 so no turn from one source dialogue can appear in both files.
@@ -19,9 +19,12 @@ from typing import Any
 import pandas as pd
 
 
-CONTEXT_PATTERN = re.compile(r"Context Begin:\s*<context>(.*?)</context>", re.DOTALL | re.IGNORECASE)
+CONTEXT_PATTERN = re.compile(
+    r"(?:Context Begin:|Conversation context:)\s*<context>(.*?)</context>",
+    re.DOTALL | re.IGNORECASE,
+)
 FIRST_USER_PATTERN = re.compile(r"(?:^|\n)User:\s*(.*?)(?=\nAssistant:|\nUser:|$)", re.DOTALL | re.IGNORECASE)
-QUESTION_PATTERN = re.compile(r"(?:^|\n)Question:\s*(.*?)(?:\n|$)", re.DOTALL | re.IGNORECASE)
+QUESTION_PATTERN = re.compile(r"(?:^|\n)(?:Question|User query):\s*(.*?)(?:\n|$)", re.DOTALL | re.IGNORECASE)
 
 
 def parse_args() -> argparse.Namespace:
@@ -54,8 +57,9 @@ def _as_prompt_text(prompt: Any) -> str:
 def dialogue_key_from_prompt(prompt: Any) -> str:
     """Return a content key for a complete source dialogue.
 
-    ConvAgent static prompts contain a gold ``<context>`` block.  Its first
-    user turn identifies the original conversation across all derived rows.
+    ConvAgent and ChatR1 static prompts contain a gold ``<context>`` block.
+    Its first user turn identifies the original conversation across all
+    derived rows.
     The conservative fallback is the current question, which preserves
     determinism for malformed external data while remaining auditable.
     """
@@ -80,7 +84,7 @@ def split_frame(
     if not 0.0 < holdout_fraction < 1.0:
         raise ValueError("--holdout-fraction must be strictly between 0 and 1")
     if "prompt" not in frame.columns:
-        raise ValueError("static ConvAgent Parquet must contain a 'prompt' column")
+        raise ValueError("static baseline Parquet must contain a 'prompt' column")
 
     dialogue_keys = [dialogue_key_from_prompt(prompt) for prompt in frame["prompt"]]
     assignments: dict[str, bool] = {}

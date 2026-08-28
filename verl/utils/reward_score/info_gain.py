@@ -4,7 +4,11 @@ import difflib
 import string
 import json
 import os
-from .ground_truth import select_answer_ground_truth, select_static_convagent_answer_ground_truth_with_passage_ids
+from .ground_truth import (
+    select_answer_ground_truth,
+    select_static_chatr1_answer_ground_truth_with_passage_ids,
+    select_static_convagent_answer_ground_truth_with_passage_ids,
+)
 
 def check_tags_balance(solution_str: str, *, allow_clarify: bool = False, allow_search: bool = False) -> bool:
     """Check if tags are properly paired
@@ -117,8 +121,19 @@ def deal_multi_labels(ground_truth):
 
 
 
-def compute_f1(solution_str, ground_truth, data_source, val_type='f1', static_convagent_mode: bool = False) -> float:
-    if static_convagent_mode:
+def compute_f1(
+    solution_str,
+    ground_truth,
+    data_source,
+    val_type='f1',
+    static_convagent_mode: bool = False,
+    static_chatr1_mode: bool = False,
+) -> float:
+    if static_chatr1_mode:
+        ground_truth = select_static_chatr1_answer_ground_truth_with_passage_ids(
+            ground_truth, data_source=data_source
+        )[0]
+    elif static_convagent_mode:
         ground_truth = select_static_convagent_answer_ground_truth_with_passage_ids(
             ground_truth, data_source=data_source
         )[0]
@@ -137,10 +152,13 @@ def compute_f1(solution_str, ground_truth, data_source, val_type='f1', static_co
     terminal_action, format_valid = extract_terminal_action(
         solution_str,
         allow_clarify=static_convagent_mode,
-        allow_search=static_convagent_mode,
+        allow_search=static_convagent_mode or static_chatr1_mode,
     )
     if not format_valid:
-        return 0.0 if val_type == 'noformatf1' else -2.0
+        # ChatR1's published objective supplies answer F1 and intent F1 only;
+        # malformed output therefore receives zero task reward rather than an
+        # additional hidden format penalty.
+        return 0.0 if (val_type == 'noformatf1' or static_chatr1_mode) else -2.0
 
     # A syntactically valid nonanswer action is not a formatting failure. It
     # receives zero textual F1; the independent action-reward channel handles
@@ -152,11 +170,11 @@ def compute_f1(solution_str, ground_truth, data_source, val_type='f1', static_co
         final_turn = solution_str.rsplit("\n<|im_start|>assistant\n", 1)[-1]
         answer_match = re.search(r'<answer>(.*?)</answer>', final_turn, re.DOTALL)
         if not answer_match:
-            return 0.0 if val_type == 'noformatf1' else -2.0
+            return 0.0 if (val_type == 'noformatf1' or static_chatr1_mode) else -2.0
         answer_content = preprocess_text(answer_match.group(1).strip())
     except Exception as e:
         print(f"Error extracting answer content: {e}")
-        return 0.0 if val_type == 'noformatf1' else -2.0
+        return 0.0 if (val_type == 'noformatf1' or static_chatr1_mode) else -2.0
     
     max_score = 0.0
     
@@ -221,6 +239,7 @@ def compute_score(
     tokenizer=None,
     is_validation=False,
     static_convagent_mode: bool = False,
+    static_chatr1_mode: bool = False,
 ):
     """
     Compute token-level reward scores
@@ -243,7 +262,11 @@ def compute_score(
     if tokenizer is None:
         raise ValueError("tokenizer cannot be None")
 
-    if static_convagent_mode:
+    if static_chatr1_mode:
+        ground_truth = select_static_chatr1_answer_ground_truth_with_passage_ids(
+            ground_truth, data_source=data_source
+        )[0]
+    elif static_convagent_mode:
         ground_truth = select_static_convagent_answer_ground_truth_with_passage_ids(
             ground_truth, data_source=data_source
         )[0]
@@ -255,17 +278,37 @@ def compute_score(
     # Compute F1/EM scores
     if is_validation:
         f1_score = compute_f1(
-            solution_str, ground_truth, data_source, val_type='f1', static_convagent_mode=static_convagent_mode
+            solution_str,
+            ground_truth,
+            data_source,
+            val_type='f1',
+            static_convagent_mode=static_convagent_mode,
+            static_chatr1_mode=static_chatr1_mode,
         )
         em_score = compute_f1(
-            solution_str, ground_truth, data_source, val_type='em', static_convagent_mode=static_convagent_mode
+            solution_str,
+            ground_truth,
+            data_source,
+            val_type='em',
+            static_convagent_mode=static_convagent_mode,
+            static_chatr1_mode=static_chatr1_mode,
         )
         noformatf1_score = compute_f1(
-            solution_str, ground_truth, data_source, val_type='noformatf1', static_convagent_mode=static_convagent_mode
+            solution_str,
+            ground_truth,
+            data_source,
+            val_type='noformatf1',
+            static_convagent_mode=static_convagent_mode,
+            static_chatr1_mode=static_chatr1_mode,
         )
     else:
         f1_score = compute_f1(
-            solution_str, ground_truth, data_source, val_type, static_convagent_mode=static_convagent_mode
+            solution_str,
+            ground_truth,
+            data_source,
+            val_type,
+            static_convagent_mode=static_convagent_mode,
+            static_chatr1_mode=static_chatr1_mode,
         )
     
     # Use offset_mapping to get precise token-character position mapping

@@ -60,6 +60,7 @@ from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
 from verl.utils.reward_score.ground_truth import (
     select_answer_ground_truth_with_passage_ids,
+    select_static_chatr1_answer_ground_truth_with_passage_ids,
     select_static_convagent_answer_ground_truth_with_passage_ids,
 )
 from verl.utils.reward_score.static_convagent import monitor_plateau_reached
@@ -671,6 +672,10 @@ class RayPPOTrainer:
             static_convagent_short_answer_tokens=int(
                 self.config.algorithm.get("static_convagent_short_answer_tokens", 4)
             ),
+            static_chatr1_mode=bool(self.config.algorithm.get("static_chatr1_mode", False)),
+            static_chatr1_intent_reward=bool(
+                self.config.algorithm.get("static_chatr1_intent_reward", False)
+            ),
         )
 
     def _make_simulated_user_manager(self, *, n: int, is_validation: bool):
@@ -1232,6 +1237,10 @@ class RayPPOTrainer:
             static_convagent_short_answer_tokens=int(
                 self.config.algorithm.get("static_convagent_short_answer_tokens", 4)
             ),
+            static_chatr1_mode=bool(self.config.algorithm.get("static_chatr1_mode", False)),
+            static_chatr1_intent_reward=bool(
+                self.config.algorithm.get("static_chatr1_intent_reward", False)
+            ),
         )
 
         generation_manager = LLMGenerationManager(
@@ -1361,19 +1370,41 @@ class RayPPOTrainer:
                         static_convagent_mode = bool(
                             self.config.algorithm.get("static_convagent_mode", False)
                         )
+                        static_chatr1_mode = bool(
+                            self.config.algorithm.get("static_chatr1_mode", False)
+                        )
+                        if static_convagent_mode and static_chatr1_mode:
+                            raise ValueError("static ConvAgent and ChatR1 modes are mutually exclusive")
                         answer_selector = (
-                            select_static_convagent_answer_ground_truth_with_passage_ids
-                            if static_convagent_mode
-                            else select_answer_ground_truth_with_passage_ids
+                            select_static_chatr1_answer_ground_truth_with_passage_ids
+                            if static_chatr1_mode
+                            else (
+                                select_static_convagent_answer_ground_truth_with_passage_ids
+                                if static_convagent_mode
+                                else select_answer_ground_truth_with_passage_ids
+                            )
                         )
                         batch_answer_references = [
                             answer_selector(reward_model, data_source=data_source)
                             for reward_model, data_source in zip(batch_reward_models, batch_data_sources)
                         ]
-                        batch_ground_truths = [
-                            {"ground_truth": answer}
-                            for answer, _ in batch_answer_references
-                        ]
+                        if static_chatr1_mode:
+                            # Query--rewrite intent reward needs the original
+                            # nested candidates, not only the display reference.
+                            batch_ground_truths = [
+                                {
+                                    "ground_truth": reward_model.get("ground_truth", reward_model)
+                                    if isinstance(reward_model, dict)
+                                    else reward_model,
+                                    "data_source": data_source,
+                                }
+                                for reward_model, data_source in zip(batch_reward_models, batch_data_sources)
+                            ]
+                        else:
+                            batch_ground_truths = [
+                                {"ground_truth": answer}
+                                for answer, _ in batch_answer_references
+                            ]
 
                         _, final_gen_batch_output, info_gain_rewards, first_retrieved_passages = generation_manager.run_llm_loop(
                             gen_batch=test_gen_batch,
@@ -1804,11 +1835,16 @@ class RayPPOTrainer:
             )
         train_reward_type = self.config.reward_model.train_reward_type
         static_convagent_mode = bool(self.config.algorithm.get("static_convagent_mode", False))
-        static_monitor_enabled = static_convagent_mode and bool(
+        static_chatr1_mode = bool(self.config.algorithm.get("static_chatr1_mode", False))
+        if static_convagent_mode and static_chatr1_mode:
+            raise ValueError("static ConvAgent and ChatR1 modes are mutually exclusive")
+        static_baseline_mode = static_convagent_mode or static_chatr1_mode
+        static_baseline_name = "StaticChatR1" if static_chatr1_mode else "StaticConvAgent"
+        static_monitor_enabled = static_baseline_mode and bool(
             self.config.trainer.get("static_convagent_monitor_enabled", True)
         )
         if static_monitor_enabled and simulated_user_enabled:
-            raise ValueError("static ConvAgent monitoring cannot be combined with simulated-user rollouts")
+            raise ValueError("static-baseline monitoring cannot be combined with simulated-user rollouts")
         static_monitor_frequency = int(
             self.config.trainer.get("static_convagent_monitor_frequency", 5)
         )
@@ -2269,7 +2305,12 @@ class RayPPOTrainer:
                             rewrite_bound_rewards=batch.non_tensor_batch.get("rewrite_bound_rewards"),
                             action_rewards=batch.non_tensor_batch.get("action_rewards"),
                             info_gain_weight=float(
-                                self.config.algorithm.get("static_convagent_info_gain_weight", 1.0)
+                                self.config.algorithm.get(
+                                    "static_chatr1_intent_weight",
+                                    1.0,
+                                )
+                                if static_chatr1_mode
+                                else self.config.algorithm.get("static_convagent_info_gain_weight", 1.0)
                             ),
                             action_reward_weight=float(
                                 self.config.algorithm.get("static_convagent_action_weight", 1.0)
@@ -2344,7 +2385,7 @@ class RayPPOTrainer:
                     static_plateau_reached = False
                     if static_monitor_due:
                         print(
-                            "[StaticConvAgent] monitor validation after completed "
+                            f"[{static_baseline_name}] monitor validation after completed "
                             f"step {self.global_steps + 1}",
                             flush=True,
                         )
@@ -2365,7 +2406,7 @@ class RayPPOTrainer:
                         monitor_score = float(static_val_metrics[static_monitor_metric])
                         if not np.isfinite(monitor_score):
                             raise RuntimeError(
-                                f"Static ConvAgent monitor metric is non-finite: {monitor_score}"
+                                f"{static_baseline_name} monitor metric is non-finite: {monitor_score}"
                             )
                         static_monitor_history.append(
                             {"completed_step": float(self.global_steps + 1), "score": monitor_score}
@@ -2385,7 +2426,7 @@ class RayPPOTrainer:
                         if static_plateau_reached:
                             static_stop_reason = "stable_holdout_plateau"
                             print(
-                                "[StaticConvAgent] stopping on stable holdout plateau: "
+                                f"[{static_baseline_name}] stopping on stable holdout plateau: "
                                 f"metric={static_monitor_metric}, score={monitor_score:.6f}, "
                                 f"checks={len(monitor_scores)}",
                                 flush=True,
@@ -2440,25 +2481,27 @@ class RayPPOTrainer:
                             last_val_metrics = val_metrics
                         metrics.update(val_metrics)
 
-                    static_final_step = static_convagent_mode and (
+                    static_final_step = static_baseline_mode and (
                         static_plateau_reached or is_last_step
                     )
-                    if static_convagent_mode and is_last_step and static_stop_reason is None:
+                    if static_baseline_mode and is_last_step and static_stop_reason is None:
                         static_stop_reason = "safety_step_ceiling"
 
                     should_save_checkpoint = (
                         static_final_step
-                        if static_convagent_mode
+                        if static_baseline_mode
                         else self.config.trainer.save_freq > 0
                         and (is_last_step or (self.global_steps + 1) % self.config.trainer.save_freq == 0)
                     )
                     if should_save_checkpoint:
                         with _timer("save_checkpoint", timing_raw):
                             self._save_checkpoint()
-                        if static_convagent_mode:
+                        if static_baseline_mode:
                             selection_path = os.path.join(
                                 self.config.trainer.default_local_dir,
-                                "static_convagent_selection.json",
+                                "static_chatr1_selection.json"
+                                if static_chatr1_mode
+                                else "static_convagent_selection.json",
                             )
                             selection = {
                                 "selection_reason": static_stop_reason,
@@ -2471,7 +2514,7 @@ class RayPPOTrainer:
                             with open(selection_path, "w", encoding="utf-8") as selection_file:
                                 json.dump(selection, selection_file, indent=2)
                             print(
-                                f"[StaticConvAgent] final checkpoint selected: "
+                                f"[{static_baseline_name}] final checkpoint selected: "
                                 f"{self.config.trainer.default_local_dir}/global_step_{self.global_steps}",
                                 flush=True,
                             )

@@ -222,6 +222,13 @@ algorithm:
   static_convagent_mode: false
   static_convagent_direct_evidence_reward: false
   static_convagent_short_answer_tokens: 4
+  # Static ChatR1-style baseline. It shares the released static
+  # <search>/<information> prompt grammar, but uses answer F1 plus the
+  # query--human-rewrite intent reward rather than ConvAgent evidence/action
+  # shaping. It never invokes the user simulator.
+  static_chatr1_mode: false
+  static_chatr1_intent_reward: false
+  static_chatr1_intent_weight: 1.0
   # Applied after independently normalizing the answer-F1, evidence and action
   # channels. ConvAgent's paper recipe uses 0.5 / 0.5 for the latter two.
   static_convagent_info_gain_weight: 1.0

@@ -59,6 +59,7 @@ def load_reward_manager(config, tokenizer, num_examine, **reward_kwargs):
     reward_kwargs = dict(reward_kwargs)
     reward_kwargs.setdefault("use_action_reward", bool(config.algorithm.get("use_action_reward", False)))
     reward_kwargs.setdefault("static_convagent_mode", bool(config.algorithm.get("static_convagent_mode", False)))
+    reward_kwargs.setdefault("static_chatr1_mode", bool(config.algorithm.get("static_chatr1_mode", False)))
     reward_kwargs.setdefault(
         "action_incorrect_reward", float(config.algorithm.get("action_incorrect_reward", -1.0))
     )
@@ -100,6 +101,7 @@ def load_train_reward_manager(config, tokenizer, num_examine, **reward_kwargs):
     reward_kwargs = dict(reward_kwargs)
     reward_kwargs.setdefault("use_action_reward", bool(config.algorithm.get("use_action_reward", False)))
     reward_kwargs.setdefault("static_convagent_mode", bool(config.algorithm.get("static_convagent_mode", False)))
+    reward_kwargs.setdefault("static_chatr1_mode", bool(config.algorithm.get("static_chatr1_mode", False)))
     reward_kwargs.setdefault(
         "action_incorrect_reward", float(config.algorithm.get("action_incorrect_reward", -1.0))
     )
@@ -141,6 +143,7 @@ def load_valid_reward_manager(config, tokenizer, num_examine, **reward_kwargs):
     reward_kwargs = dict(reward_kwargs)
     reward_kwargs.setdefault("use_action_reward", bool(config.algorithm.get("use_action_reward", False)))
     reward_kwargs.setdefault("static_convagent_mode", bool(config.algorithm.get("static_convagent_mode", False)))
+    reward_kwargs.setdefault("static_chatr1_mode", bool(config.algorithm.get("static_chatr1_mode", False)))
     reward_kwargs.setdefault(
         "action_incorrect_reward", float(config.algorithm.get("action_incorrect_reward", -1.0))
     )

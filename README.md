@@ -75,6 +75,8 @@ InteractiveChat-R1/
 │   ├── prepare_static_convagent_monitor_split.py
 │   ├── run_static_convagent_{inscit,qrecc}_suite.sh
 │   ├── run_static_convagent_train.sh / run_static_convagent_eval.sh
+│   ├── run_static_chatr1_{inscit,qrecc}_suite.sh
+│   ├── run_static_chatr1_train.sh / run_static_chatr1_eval.sh
 │   ├── run_{inscit,qrecc}_{3b,7b}_full_val.sh
 │   ├── run_topiocqa_from_inscit_*_full_val.sh
 │   └── run_coral_from_qrecc_*_full_val.sh
@@ -492,6 +494,109 @@ Replace the 3B path/tag with `models/Qwen2.5-7B-Instruct` and
 `eval_log/static_convagent/<experiment>_to_{target}/metrics_summary.json`.
 The monitor split is strictly for checkpoint selection; no static test set is
 used during selection.
+
+### Static ChatR1-style baseline
+
+The repository additionally provides a separate **static ChatR1-style**
+baseline using the released `DrewZhang/conv/ChatR1/` Parquets.  This is a
+matched-budget adaptation: it retains ChatR1's static prompt grammar and its
+two task rewards, while deliberately using the same runtime budget as this
+repository's full method (batch `128`, PPO mini-batch `64`, GRPO group size
+`8`, validation batch `256`, one query/action, top-3 retrieval, four action
+turns, and an 8192-token context).
+
+For each trajectory, the terminal reward is the maximum word-level F1 between
+the final `<answer>` and any released answer reference.  The intermediate
+intent reward is
+
+`max_q F1(q, human_rewrite)`;
+
+it is credited once to the valid `<search>` action with the largest overlap.
+There is no user simulator, user feedback, action reward, format reward, or
+interactive reward in this baseline.  This preserves the released static
+ChatR1 supervision while keeping model size, retrieval interface, and GRPO
+budget controlled.
+
+Download only the ChatR1 static Parquets. They are already static train/test
+data and are consumed verbatim—do not run the dynamic benchmark converter.
+Each row contains the released ChatR1 prompt plus `reward_model.ground_truth`:
+one or more answer candidates with their `response`, gold `passage_id`, and
+human standalone-query `rewrite` fields.
+
+```bash
+hf download DrewZhang/conv --repo-type dataset \
+  --include "ChatR1/**" \
+  --local-dir data/static_chatr1_raw
+```
+
+At first launch, the trainer forms a deterministic 90/10,
+conversation-disjoint train/monitor split at
+`data/static_chatr1_splits/{inscit,qrecc}/`. It checks monitor answer F1 every
+five updates and writes **only one** checkpoint when the monitor curve has
+plateaued and stabilized (last three checks: no `0.002` improvement over the
+previous best and range at most `0.005`). `MAX_TRAINING_STEPS=1000` is solely a
+safety ceiling, not a selected final step. The selected checkpoint and monitor
+history are recorded in `static_chatr1_selection.json`.
+
+Start the local retriever but do **not** start the Qwen32B user simulator. The
+active retriever collection must match the source dataset during train/source
+test. Restart the retriever with the target collection before each cross-data
+evaluation.
+
+```bash
+# InsCiT train -> InsCiT static test. Uses the active InsCiT retriever.
+nohup env \
+  CUDA_VISIBLE_DEVICES=2,3 N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
+  MODEL_PATH=$PWD/models/Qwen2.5-3B-Instruct MODEL_TAG=qwen25_3b \
+  INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
+  bash scripts/run_static_chatr1_inscit_suite.sh \
+  > logs/static_chatr1_inscit_3b.log 2>&1 &
+
+# QReCC train -> QReCC static test. Uses the active QReCC retriever.
+nohup env \
+  CUDA_VISIBLE_DEVICES=2,3 N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
+  MODEL_PATH=$PWD/models/Qwen2.5-3B-Instruct MODEL_TAG=qwen25_3b \
+  INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
+  bash scripts/run_static_chatr1_qrecc_suite.sh \
+  > logs/static_chatr1_qrecc_3b.log 2>&1 &
+```
+
+After the source run ends, use its `final_checkpoint.txt` for cross-dataset
+evaluation. The output metrics are multi-reference answer F1, multi-reference
+BERTScore F1, and NDCG@3. For InsCiT -> TopiOCQA, restart the retriever with
+the TopiOCQA collection first:
+
+```bash
+CHECKPOINT_PATH="$(< outputs/static_chatr1/static_chatr1_inscit_qwen25_3b/final_checkpoint.txt)"
+
+TRAIN_DATASET=inscit \
+EVAL_DATASET=topiocqa \
+CHECKPOINT_PATH="$CHECKPOINT_PATH" \
+EXPERIMENT_NAME=static_chatr1_inscit_qwen25_3b_to_topiocqa \
+CUDA_VISIBLE_DEVICES=2,3 N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
+MODEL_PATH=$PWD/models/Qwen2.5-3B-Instruct \
+INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
+bash scripts/run_static_chatr1_eval.sh
+```
+
+For QReCC -> CoRAL, restart with the CoRAL collection first:
+
+```bash
+CHECKPOINT_PATH="$(< outputs/static_chatr1/static_chatr1_qrecc_qwen25_3b/final_checkpoint.txt)"
+
+TRAIN_DATASET=qrecc \
+EVAL_DATASET=coral \
+CHECKPOINT_PATH="$CHECKPOINT_PATH" \
+EXPERIMENT_NAME=static_chatr1_qrecc_qwen25_3b_to_coral \
+CUDA_VISIBLE_DEVICES=2,3 N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
+MODEL_PATH=$PWD/models/Qwen2.5-3B-Instruct \
+INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
+bash scripts/run_static_chatr1_eval.sh
+```
+
+Use the 7B model path and `MODEL_TAG=qwen25_7b` to run the 7B baseline.
+Results are written under `outputs/static_chatr1/<experiment>/` and
+`eval_log/static_chatr1/<experiment>/metrics_summary.json`.
 
 ### Canonical configuration
 

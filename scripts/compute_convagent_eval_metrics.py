@@ -31,6 +31,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bert-score-batch-size", default=16, type=int)
     parser.add_argument("--bert-score-device", default="auto", help="auto, cuda, cuda:0, or cpu")
     parser.add_argument(
+        "--multi-reference",
+        action="store_true",
+        help="Score BERTScore against every <|answer_split|> reference and retain the best value.",
+    )
+    parser.add_argument(
         "--simulated-user-batches-evaluated",
         type=int,
         default=None,
@@ -192,7 +197,14 @@ def resolve_bertscore_device(requested_device: str) -> str:
         return "cpu"
 
 
-def calculate_bertscore(records: list[dict[str, Any]], model: str, batch_size: int, device: str) -> None:
+def calculate_bertscore(
+    records: list[dict[str, Any]],
+    model: str,
+    batch_size: int,
+    device: str,
+    *,
+    multi_reference: bool = False,
+) -> None:
     valid_indices = [
         index
         for index, record in enumerate(records)
@@ -208,8 +220,20 @@ def calculate_bertscore(records: list[dict[str, Any]], model: str, batch_size: i
             "BERTScore is not installed. Run: python -m pip install 'bert-score==0.3.13'"
         ) from exc
 
-    candidates = [records[index]["predicted_answer"] for index in valid_indices]
-    references = [records[index]["ground_truth_answer"] for index in valid_indices]
+    pairs: list[tuple[int, str, str]] = []
+    for index in valid_indices:
+        references = (
+            records[index]["ground_truth_answer"].split("<|answer_split|>")
+            if multi_reference
+            else [records[index]["ground_truth_answer"]]
+        )
+        for reference in references:
+            if reference.strip():
+                pairs.append((index, records[index]["predicted_answer"], reference))
+    if not pairs:
+        return
+    candidates = [candidate for _index, candidate, _reference in pairs]
+    references = [reference for _index, _candidate, reference in pairs]
     _, _, f1_values = bert_score(
         candidates,
         references,
@@ -221,8 +245,8 @@ def calculate_bertscore(records: list[dict[str, Any]], model: str, batch_size: i
         rescale_with_baseline=False,
         verbose=True,
     )
-    for index, value in zip(valid_indices, f1_values.tolist(), strict=True):
-        records[index]["bertscore_f1"] = float(value)
+    for (index, _candidate, _reference), value in zip(pairs, f1_values.tolist(), strict=True):
+        records[index]["bertscore_f1"] = max(records[index]["bertscore_f1"], float(value))
 
 
 def read_jsonl(input_path: Path) -> list[dict[str, Any]]:
@@ -243,6 +267,18 @@ def read_jsonl(input_path: Path) -> list[dict[str, Any]]:
     if not rows:
         raise ValueError(f"Validation JSONL is empty: {input_path}")
     return rows
+
+
+def infer_checkpoint_step(input_path: Path) -> int | None:
+    """Infer the zero-based checkpoint step from a trainer validation JSONL.
+
+    Static baseline launchers name their validation export ``<global_step>.jsonl``.
+    Returning ``None`` preserves compatibility with manually named JSONL files.
+    """
+    try:
+        return int(input_path.stem)
+    except ValueError:
+        return None
 
 
 def main() -> None:
@@ -327,7 +363,13 @@ def main() -> None:
         )
 
     bertscore_device = resolve_bertscore_device(args.bert_score_device)
-    calculate_bertscore(per_sample, args.bert_score_model, args.bert_score_batch_size, bertscore_device)
+    calculate_bertscore(
+        per_sample,
+        args.bert_score_model,
+        args.bert_score_batch_size,
+        bertscore_device,
+        multi_reference=args.multi_reference,
+    )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     per_sample_path = args.output_dir / "metrics_per_sample.jsonl"
@@ -428,6 +470,15 @@ def main() -> None:
         "ndcg_at_3": "Answer-only binary NDCG@3. TopiOCQA uses normalized exact passage-text matching because its source and retriever IDs differ; other datasets use strict passage-ID matching. Empty labels are 0.",
         "action_accuracy": "Terminal action accuracy on action-labelled datasets; static ConvAgent rows may define a set of permissible actions.",
     }
+    if args.multi_reference:
+        metric_definitions["f1"] = (
+            "Answer-only maximum token-set F1 over all released answer references, "
+            "using the terminal valid <answer> or latest valid <answer>; no valid answer is 0."
+        )
+        metric_definitions["bertscore_f1"] = (
+            "Answer-only maximum BERTScore F1 over all released answer references, "
+            "using the terminal valid <answer> or latest valid <answer>; no valid answer is 0."
+        )
     if simulated_user_records:
         metric_definitions.update(
             {
@@ -451,8 +502,13 @@ def main() -> None:
                 "Mean terminal response depth among answer-labelled simulated-user sub-tasks; depth 1 means no retry."
             )
 
+    checkpoint_global_step = infer_checkpoint_step(args.input)
     summary = {
         "input_jsonl": str(args.input),
+        "checkpoint_global_step": checkpoint_global_step,
+        "checkpoint_completed_step": (
+            checkpoint_global_step + 1 if checkpoint_global_step is not None else None
+        ),
         "sample_count": len(per_sample),
         "terminal_answer_count": sum(record["has_terminal_answer"] for record in per_sample),
         "selected_answer_count": sum(record["has_selected_answer"] for record in per_sample),
@@ -461,8 +517,10 @@ def main() -> None:
         ),
         "answer_label_count": sum(bool(record["ground_truth_answer"]) for record in per_sample),
         "retrieval_label_count": sum(bool(record["ground_truth_passage_ids"]) for record in per_sample),
-        "action_label_count": len(action_labeled),        "bertscore_model": args.bert_score_model,
+        "action_label_count": len(action_labeled),
+        "bertscore_model": args.bert_score_model,
         "bertscore_device": bertscore_device,
+        "multi_reference": bool(args.multi_reference),
         "metrics": {
             "f1": fmean(record["f1"] for record in answer_labeled) if answer_labeled else 0.0,
             "bertscore_f1": fmean(record["bertscore_f1"] for record in answer_labeled)
