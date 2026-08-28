@@ -406,6 +406,8 @@ def compute_grpo_outcome_advantage(
     query_group_metrics: Optional[dict[str, float]] = None,
     rewrite_bound_rewards: Any = None,
     action_rewards: Any = None,
+    info_gain_weight: float = 1.0,
+    action_reward_weight: float = 1.0,
 ):
     """
     Compute advantage for GRPO using Turn-level accumulation + broadcast.
@@ -542,7 +544,9 @@ def compute_grpo_outcome_advantage(
                 "query_group_advantage must be 'disabled' or 'semantic', "
                 f"got {query_group_advantage!r}"
             )
-        normalized_rewards = torch.where(ig_mask, norm_ig, normalized_rewards)
+        normalized_rewards = torch.where(
+            ig_mask, norm_ig * float(info_gain_weight), normalized_rewards
+        )
 
         if rewrite_mask.any():
             rewrite_mean, rewrite_std = compute_group_stats(rewrite_mask, rewrite_values)
@@ -563,7 +567,9 @@ def compute_grpo_outcome_advantage(
             if norm_adv_by_std_in_grpo:
                 norm_action = norm_action / (action_std_map + epsilon)
             normalized_rewards = normalized_rewards + torch.where(
-                action_mask, norm_action, torch.zeros_like(normalized_rewards)
+                action_mask,
+                norm_action * float(action_reward_weight),
+                torch.zeros_like(normalized_rewards),
             )
     
     else:  # joint

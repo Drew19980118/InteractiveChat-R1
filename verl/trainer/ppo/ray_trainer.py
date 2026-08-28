@@ -58,7 +58,11 @@ from verl.trainer.ppo.metric_utils import (
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
-from verl.utils.reward_score.ground_truth import select_answer_ground_truth_with_passage_ids
+from verl.utils.reward_score.ground_truth import (
+    select_answer_ground_truth_with_passage_ids,
+    select_static_convagent_answer_ground_truth_with_passage_ids,
+)
+from verl.utils.reward_score.static_convagent import monitor_plateau_reached
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
@@ -410,6 +414,8 @@ def compute_advantage(
     query_group_metrics=None,
     rewrite_bound_rewards=None,
     action_rewards=None,
+    info_gain_weight=1.0,
+    action_reward_weight=1.0,
     simulated_user_enabled=False,
     simulated_user_component_weights=None,
     simulated_user_metrics=None,
@@ -488,6 +494,8 @@ def compute_advantage(
                 query_group_metrics=query_group_metrics,
                 rewrite_bound_rewards=rewrite_bound_rewards,
                 action_rewards=action_rewards,
+                info_gain_weight=info_gain_weight,
+                action_reward_weight=action_reward_weight,
             )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
@@ -656,6 +664,13 @@ class RayPPOTrainer:
                 "max_model_len", self.config.data.get("max_model_len", None)
             ),
             max_response_length=self.config.data.max_response_length,
+            static_convagent_mode=bool(self.config.algorithm.get("static_convagent_mode", False)),
+            static_convagent_direct_evidence_reward=bool(
+                self.config.algorithm.get("static_convagent_direct_evidence_reward", False)
+            ),
+            static_convagent_short_answer_tokens=int(
+                self.config.algorithm.get("static_convagent_short_answer_tokens", 4)
+            ),
         )
 
     def _make_simulated_user_manager(self, *, n: int, is_validation: bool):
@@ -1091,7 +1106,11 @@ class RayPPOTrainer:
         has_action_labels = (
             expected_actions is not None
             and len(expected_actions) == n
-            and any(action in {"answer", "nonanswer"} for action in expected_actions)
+            and any(
+                (isinstance(action, (list, tuple, set)) and len(action) > 0)
+                or action in {"answer", "clarify", "nonanswer"}
+                for action in expected_actions
+            )
         )
         if has_action_labels:
             if predicted_actions is not None and len(predicted_actions) == n:
@@ -1206,6 +1225,13 @@ class RayPPOTrainer:
                 'max_model_len', self.config.data.get('max_model_len', None)
             ),
             max_response_length=self.config.data.max_response_length,
+            static_convagent_mode=bool(self.config.algorithm.get("static_convagent_mode", False)),
+            static_convagent_direct_evidence_reward=bool(
+                self.config.algorithm.get("static_convagent_direct_evidence_reward", False)
+            ),
+            static_convagent_short_answer_tokens=int(
+                self.config.algorithm.get("static_convagent_short_answer_tokens", 4)
+            ),
         )
 
         generation_manager = LLMGenerationManager(
@@ -1332,8 +1358,16 @@ class RayPPOTrainer:
                         batch_data_sources = list(
                             test_batch.non_tensor_batch.get("data_source", ["unknown"] * norm_len)
                         )[:norm_len]
+                        static_convagent_mode = bool(
+                            self.config.algorithm.get("static_convagent_mode", False)
+                        )
+                        answer_selector = (
+                            select_static_convagent_answer_ground_truth_with_passage_ids
+                            if static_convagent_mode
+                            else select_answer_ground_truth_with_passage_ids
+                        )
                         batch_answer_references = [
-                            select_answer_ground_truth_with_passage_ids(reward_model, data_source=data_source)
+                            answer_selector(reward_model, data_source=data_source)
                             for reward_model, data_source in zip(batch_reward_models, batch_data_sources)
                         ]
                         batch_ground_truths = [
@@ -1452,13 +1486,18 @@ class RayPPOTrainer:
             metric_dict[f'val/test_score/{data_source}'] = np.mean(rewards)
 
         # Action accuracy is only defined for converted action-labelled samples
-        # (InSCIt / TopiOCQA). QReCC and CoRAL have expected_action=None.
+        # (InsCiT / TopiOCQA). Static ConvAgent labels may contain an allowed
+        # set of actions, whereas online data has one canonical action.
         action_values_by_source: dict[str, list[float]] = defaultdict(list)
         if len(expected_actions) == len(data_sources):
             for data_source, expected_action, action_correct in zip(
                 data_sources, expected_actions, action_corrects
             ):
-                if expected_action in {"answer", "nonanswer"} and action_correct is not None:
+                has_action_label = (
+                    isinstance(expected_action, (list, tuple, set))
+                    and len(expected_action) > 0
+                ) or expected_action in {"answer", "clarify", "nonanswer"}
+                if has_action_label and action_correct is not None:
                     action_values_by_source[str(data_source)].append(float(bool(action_correct)))
         for data_source, values in action_values_by_source.items():
             metric_dict[f"val/test_score/{data_source}_action_accuracy"] = np.mean(values)
@@ -1764,6 +1803,34 @@ class RayPPOTrainer:
                 client=self.client,
             )
         train_reward_type = self.config.reward_model.train_reward_type
+        static_convagent_mode = bool(self.config.algorithm.get("static_convagent_mode", False))
+        static_monitor_enabled = static_convagent_mode and bool(
+            self.config.trainer.get("static_convagent_monitor_enabled", True)
+        )
+        if static_monitor_enabled and simulated_user_enabled:
+            raise ValueError("static ConvAgent monitoring cannot be combined with simulated-user rollouts")
+        static_monitor_frequency = int(
+            self.config.trainer.get("static_convagent_monitor_frequency", 5)
+        )
+        static_monitor_patience = int(
+            self.config.trainer.get("static_convagent_monitor_patience", 3)
+        )
+        static_monitor_min_delta = float(
+            self.config.trainer.get("static_convagent_monitor_min_delta", 0.002)
+        )
+        static_monitor_stability_window = int(
+            self.config.trainer.get("static_convagent_monitor_stability_window", 3)
+        )
+        static_monitor_stability_tolerance = float(
+            self.config.trainer.get("static_convagent_monitor_stability_tolerance", 0.005)
+        )
+        static_monitor_metric = str(
+            self.config.trainer.get("static_convagent_monitor_metric", "")
+        ).strip()
+        if static_monitor_enabled and static_monitor_frequency < 1:
+            raise ValueError("trainer.static_convagent_monitor_frequency must be >= 1")
+        static_monitor_history: list[dict[str, float]] = []
+        static_stop_reason: Optional[str] = None
         offset = 0
         for epoch in range(self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
@@ -2201,6 +2268,12 @@ class RayPPOTrainer:
                             query_group_metrics=query_group_metrics,
                             rewrite_bound_rewards=batch.non_tensor_batch.get("rewrite_bound_rewards"),
                             action_rewards=batch.non_tensor_batch.get("action_rewards"),
+                            info_gain_weight=float(
+                                self.config.algorithm.get("static_convagent_info_gain_weight", 1.0)
+                            ),
+                            action_reward_weight=float(
+                                self.config.algorithm.get("static_convagent_action_weight", 1.0)
+                            ),
                             simulated_user_enabled=simulated_user_enabled,
                             simulated_user_component_weights=simulated_user_component_weights,
                             simulated_user_metrics=simulated_user_metrics,
@@ -2259,6 +2332,65 @@ class RayPPOTrainer:
                         for metric_name, metric_value in sorted(query_group_metrics.items()):
                             print(f"{metric_name}: {metric_value}", flush=True)
 
+                    # The static ConvAgent-style baseline has no prescribed
+                    # final step.  It monitors a conversation-disjoint subset
+                    # of the static training data and ends only once that
+                    # metric has both plateaued and stabilized.  The configured
+                    # total steps remains a safety ceiling, not model selection.
+                    static_monitor_due = (
+                        static_monitor_enabled
+                        and (self.global_steps + 1) % static_monitor_frequency == 0
+                    )
+                    static_plateau_reached = False
+                    if static_monitor_due:
+                        print(
+                            "[StaticConvAgent] monitor validation after completed "
+                            f"step {self.global_steps + 1}",
+                            flush=True,
+                        )
+                        with _timer("testing", timing_raw):
+                            static_val_metrics = self._validate()
+                        metrics.update(static_val_metrics)
+                        if not static_monitor_metric:
+                            available = sorted(static_val_metrics)
+                            raise ValueError(
+                                "Set trainer.static_convagent_monitor_metric; "
+                                f"available metrics: {available}"
+                            )
+                        if static_monitor_metric not in static_val_metrics:
+                            raise ValueError(
+                                "Static ConvAgent monitor metric is missing: "
+                                f"{static_monitor_metric}; available={sorted(static_val_metrics)}"
+                            )
+                        monitor_score = float(static_val_metrics[static_monitor_metric])
+                        if not np.isfinite(monitor_score):
+                            raise RuntimeError(
+                                f"Static ConvAgent monitor metric is non-finite: {monitor_score}"
+                            )
+                        static_monitor_history.append(
+                            {"completed_step": float(self.global_steps + 1), "score": monitor_score}
+                        )
+                        monitor_scores = [entry["score"] for entry in static_monitor_history]
+                        static_plateau_reached = monitor_plateau_reached(
+                            monitor_scores,
+                            patience=static_monitor_patience,
+                            min_delta=static_monitor_min_delta,
+                            stability_window=static_monitor_stability_window,
+                            stability_tolerance=static_monitor_stability_tolerance,
+                        )
+                        metrics["static_convagent/monitor_score"] = monitor_score
+                        metrics["static_convagent/monitor_checks"] = float(len(monitor_scores))
+                        metrics["static_convagent/monitor_plateau"] = float(static_plateau_reached)
+                        last_val_metrics = static_val_metrics
+                        if static_plateau_reached:
+                            static_stop_reason = "stable_holdout_plateau"
+                            print(
+                                "[StaticConvAgent] stopping on stable holdout plateau: "
+                                f"metric={static_monitor_metric}, score={monitor_score:.6f}, "
+                                f"checks={len(monitor_scores)}",
+                                flush=True,
+                            )
+
                     # Optional quick validation is useful during long online
                     # simulated-user runs.  It intentionally evaluates only a
                     # capped prefix of packed validation batches; the final
@@ -2298,18 +2430,51 @@ class RayPPOTrainer:
 
                     # The final validation is always the complete validation
                     # split.  It never inherits the intermediate smoke cap.
-                    if (self.val_reward_fn is not None or simulated_user_enabled) and is_last_step:
+                    if (
+                        (self.val_reward_fn is not None or simulated_user_enabled)
+                        and is_last_step
+                        and not static_monitor_due
+                    ):
                         with _timer("testing", timing_raw):
                             val_metrics: dict = self._validate()
                             last_val_metrics = val_metrics
                         metrics.update(val_metrics)
 
-                    should_save_checkpoint = self.config.trainer.save_freq > 0 and (
-                        is_last_step or (self.global_steps + 1) % self.config.trainer.save_freq == 0
+                    static_final_step = static_convagent_mode and (
+                        static_plateau_reached or is_last_step
+                    )
+                    if static_convagent_mode and is_last_step and static_stop_reason is None:
+                        static_stop_reason = "safety_step_ceiling"
+
+                    should_save_checkpoint = (
+                        static_final_step
+                        if static_convagent_mode
+                        else self.config.trainer.save_freq > 0
+                        and (is_last_step or (self.global_steps + 1) % self.config.trainer.save_freq == 0)
                     )
                     if should_save_checkpoint:
                         with _timer("save_checkpoint", timing_raw):
                             self._save_checkpoint()
+                        if static_convagent_mode:
+                            selection_path = os.path.join(
+                                self.config.trainer.default_local_dir,
+                                "static_convagent_selection.json",
+                            )
+                            selection = {
+                                "selection_reason": static_stop_reason,
+                                "selected_global_step": self.global_steps,
+                                "selected_completed_step": self.global_steps + 1,
+                                "monitor_metric": static_monitor_metric,
+                                "monitor_history": static_monitor_history,
+                                "safety_step_ceiling": self.total_training_steps,
+                            }
+                            with open(selection_path, "w", encoding="utf-8") as selection_file:
+                                json.dump(selection, selection_file, indent=2)
+                            print(
+                                f"[StaticConvAgent] final checkpoint selected: "
+                                f"{self.config.trainer.default_local_dir}/global_step_{self.global_steps}",
+                                flush=True,
+                            )
 
                 # training metrics
                 metrics.update(
@@ -2328,14 +2493,14 @@ class RayPPOTrainer:
                 # Persist/log metrics together with checkpoints, plus the final
                 # validation metrics.  This is deliberately independent of
                 # ``test_freq`` because validation is final-step-only above.
-                if is_last_step or should_save_checkpoint:
+                if is_last_step or static_final_step or should_save_checkpoint:
                     val_data_dir = self.config.trainer.get("validation_data_dir", None)
                     if val_data_dir:
                         with open(f'{val_data_dir}/metric_step_{self.global_steps}.json', 'w') as f:
                             json.dump(metrics, f)
                     logger.log(data=metrics, step=self.global_steps)
 
-                if is_last_step:
+                if is_last_step or static_final_step:
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
                     return

@@ -58,6 +58,10 @@ def get_custom_reward_fn(config):
 def load_reward_manager(config, tokenizer, num_examine, **reward_kwargs):
     reward_kwargs = dict(reward_kwargs)
     reward_kwargs.setdefault("use_action_reward", bool(config.algorithm.get("use_action_reward", False)))
+    reward_kwargs.setdefault("static_convagent_mode", bool(config.algorithm.get("static_convagent_mode", False)))
+    reward_kwargs.setdefault(
+        "action_incorrect_reward", float(config.algorithm.get("action_incorrect_reward", -1.0))
+    )
     reward_manager_name = config.reward_model.get("reward_manager", "naive")
     if reward_manager_name == 'naive_batch':
         from verl.workers.reward_manager import NaiveBatchRewardManager
@@ -95,6 +99,10 @@ def load_reward_manager(config, tokenizer, num_examine, **reward_kwargs):
 def load_train_reward_manager(config, tokenizer, num_examine, **reward_kwargs):
     reward_kwargs = dict(reward_kwargs)
     reward_kwargs.setdefault("use_action_reward", bool(config.algorithm.get("use_action_reward", False)))
+    reward_kwargs.setdefault("static_convagent_mode", bool(config.algorithm.get("static_convagent_mode", False)))
+    reward_kwargs.setdefault(
+        "action_incorrect_reward", float(config.algorithm.get("action_incorrect_reward", -1.0))
+    )
     reward_manager_name = config.reward_model.get("train_reward_manager", "naive")
     if reward_manager_name == 'naive_batch':
         from verl.workers.reward_manager import NaiveBatchRewardManager
@@ -132,6 +140,10 @@ def load_train_reward_manager(config, tokenizer, num_examine, **reward_kwargs):
 def load_valid_reward_manager(config, tokenizer, num_examine, **reward_kwargs):
     reward_kwargs = dict(reward_kwargs)
     reward_kwargs.setdefault("use_action_reward", bool(config.algorithm.get("use_action_reward", False)))
+    reward_kwargs.setdefault("static_convagent_mode", bool(config.algorithm.get("static_convagent_mode", False)))
+    reward_kwargs.setdefault(
+        "action_incorrect_reward", float(config.algorithm.get("action_incorrect_reward", -1.0))
+    )
     reward_manager_name = config.reward_model.get("valid_reward_manager", "naive")
     if reward_manager_name == 'naive_batch':
         from verl.workers.reward_manager import NaiveBatchRewardManager

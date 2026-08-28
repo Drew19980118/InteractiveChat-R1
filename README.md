@@ -72,6 +72,9 @@ InteractiveChat-R1/
 │   ├── run_{inscit,qrecc}_{3b,7b}_full_train.sh
 │   ├── run_inscit_3b_{wo_satisfaction_reward,wo_user_feedback,wo_patience_penalty}_train.sh
 │   ├── run_inscit_3b_ablation_suite.sh
+│   ├── prepare_static_convagent_monitor_split.py
+│   ├── run_static_convagent_{inscit,qrecc}_suite.sh
+│   ├── run_static_convagent_train.sh / run_static_convagent_eval.sh
 │   ├── run_{inscit,qrecc}_{3b,7b}_full_val.sh
 │   ├── run_topiocqa_from_inscit_*_full_val.sh
 │   └── run_coral_from_qrecc_*_full_val.sh
@@ -389,6 +392,106 @@ curl http://127.0.0.1:8010/v1/models
 The expected model ID is `qwen32b-user-simulator`.  If port 8010 is occupied, either stop the process that owns that port or set `SIMULATOR_PORT=<free-port>` and use the same port in `USER_SIMULATOR_BASE_URL` below.  Never stop the retriever on port 8002 when fixing the simulator.
 
 ## Training
+
+### Static ConvAgent-style baseline
+
+`InteractiveChat-R1` also includes a standalone **static ConvAgent-style**
+baseline for a controlled comparison against online user-centred training. It
+uses the original static prompt/history format and never starts the user
+simulator: the model emits `<search>query</search>`, receives top-3 passages
+inside `<information>...</information>`, and terminates with `answer`,
+`clarify`, or `nonanswer` when permitted by the source label.
+
+The baseline uses the same core optimization budget as the online recipe:
+global static-context batch `128`, PPO mini-batch `64`, GRPO group size `8`,
+validation batch `256`, one query per search, top-3 retrieval, a four-action
+trajectory limit, and an 8192-token context window. Its static reward is
+answer F1 plus independently normalized direct evidence coverage and action
+validity (the latter two have post-normalization weight `0.5`). An incorrect
+labelled action receives `-0.5`.
+
+Download the static source Parquets once.  Use **only** the
+`DrewZhang/conv/ConvAgent/` folder: the repository also contains separate
+`ChatR1/` and `IGPO/` releases, which must not be mixed into this baseline.
+The ConvAgent rows use the schema `prompt`, `data_source`, `ability`,
+`extra_info`, and `reward_model`.  The downloaded files are already the
+original per-benchmark static train/test Parquets, so the launchers consume
+them **directly**: no dynamic conversion, prompt rewriting, or label
+rewriting is performed.
+
+```bash
+hf download DrewZhang/conv --repo-type dataset \
+  --include "ConvAgent/**" \
+  --local-dir data/static_convagent_raw
+```
+
+For example, InsCiT training reads
+`data/static_convagent_raw/ConvAgent/inscit/inscit_train.parquet` directly.
+`scripts/prepare_static_convagent_source.py` remains only as a compatibility
+utility for a flattened Hugging Face Dataset Viewer export; it is not part of
+the standard baseline procedure.
+
+At first launch, the trainer deterministically splits each *training*
+dataset by complete source conversation into 90% train and 10% monitor data
+under `data/static_convagent_splits/`. It validates every five updates and
+saves one checkpoint only when monitor F1 has plateaued: the last three
+monitor values must be within `0.005`, and the last three checks must not
+improve the earlier best by at least `0.002`. `MAX_TRAINING_STEPS=1000` is a
+safety ceiling, not a selected final step. The selected checkpoint and full
+monitor history are written to `static_convagent_selection.json`.
+
+The local retriever from Step 5 must be running, but the Qwen32B user
+simulator is not needed.  A retriever collection must always match the active
+dataset: use the InsCiT (or QReCC) collection for training and source-test
+evaluation, then restart it with the TopiOCQA (or CoRAL) collection before
+cross-dataset evaluation.  The suite launchers train once and automatically
+evaluate only the source test set; the cross-dataset commands below are run
+after that collection switch.
+
+```bash
+# InsCiT train -> InsCiT static test
+nohup env \
+  CUDA_VISIBLE_DEVICES=2,3 N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
+  MODEL_PATH=$PWD/models/Qwen2.5-3B-Instruct MODEL_TAG=qwen25_3b \
+  INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
+  bash scripts/run_static_convagent_inscit_suite.sh \
+  > logs/static_convagent_inscit_3b.log 2>&1 &
+
+# QReCC train -> QReCC static test
+nohup env \
+  CUDA_VISIBLE_DEVICES=2,3 N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
+  MODEL_PATH=$PWD/models/Qwen2.5-3B-Instruct MODEL_TAG=qwen25_3b \
+  INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
+  bash scripts/run_static_convagent_qrecc_suite.sh \
+  > logs/static_convagent_qrecc_3b.log 2>&1 &
+```
+
+For InsCiT -> TopiOCQA, first restart the retriever with the aligned
+TopiOCQA index and corpus, then run the selected checkpoint explicitly:
+
+```bash
+CHECKPOINT_PATH="$(< outputs/static_convagent/static_convagent_inscit_qwen25_3b/final_checkpoint.txt)"
+
+TRAIN_DATASET=inscit \
+EVAL_DATASET=topiocqa \
+CHECKPOINT_PATH="$CHECKPOINT_PATH" \
+EXPERIMENT_NAME=static_convagent_inscit_qwen25_3b_to_topiocqa \
+CUDA_VISIBLE_DEVICES=2,3 N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
+MODEL_PATH=$PWD/models/Qwen2.5-3B-Instruct \
+INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
+bash scripts/run_static_convagent_eval.sh
+```
+
+Use the analogous QReCC -> CoRAL command after restarting with the CoRAL
+index: set `TRAIN_DATASET=qrecc`, `EVAL_DATASET=coral`, and point
+`CHECKPOINT_PATH` at the selected QReCC checkpoint.
+
+Replace the 3B path/tag with `models/Qwen2.5-7B-Instruct` and
+`MODEL_TAG=qwen25_7b` for the 7B baseline. Results are stored under
+`outputs/static_convagent/<experiment>/` and
+`eval_log/static_convagent/<experiment>_to_{target}/metrics_summary.json`.
+The monitor split is strictly for checkpoint selection; no static test set is
+used during selection.
 
 ### Canonical configuration
 

@@ -216,6 +216,16 @@ algorithm:
   allow_nonanswer_action: false
   # Independent terminal action reward, enabled by action-labelled dataset wrappers only.
   use_action_reward: false
+  action_incorrect_reward: -1.0
+  # Static ConvAgent-style baseline. It uses the benchmark's native
+  # <search>/<information> protocol and never calls a user simulator.
+  static_convagent_mode: false
+  static_convagent_direct_evidence_reward: false
+  static_convagent_short_answer_tokens: 4
+  # Applied after independently normalizing the answer-F1, evidence and action
+  # channels. ConvAgent's paper recipe uses 0.5 / 0.5 for the latter two.
+  static_convagent_info_gain_weight: 1.0
+  static_convagent_action_weight: 1.0
   # Opt-in full-dialogue simulated-user sparse GRPO. Legacy IGPO remains the default.
   simulated_user_enabled: false
   # ``full`` is the proposed F1 + user-satisfaction objective. ``answer_f1_only``
@@ -303,6 +313,15 @@ trainer:
   balance_batch: False #!
   total_epochs: 30
   total_training_steps: null
+  # Static ConvAgent baseline model selection. These controls are ignored by
+  # InteractiveChat-R1's online simulated-user training recipe.
+  static_convagent_monitor_enabled: false
+  static_convagent_monitor_frequency: 5
+  static_convagent_monitor_metric: ''
+  static_convagent_monitor_patience: 3
+  static_convagent_monitor_min_delta: 0.002
+  static_convagent_monitor_stability_window: 3
+  static_convagent_monitor_stability_tolerance: 0.005
   project_name: verl_examples
   experiment_name: gsm8k
   logger: [ 'console', 'tensorboard' ]

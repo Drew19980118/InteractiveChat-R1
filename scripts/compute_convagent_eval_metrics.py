@@ -68,6 +68,21 @@ def as_string_list(value: Any) -> list[str]:
     return [as_text(value)]
 
 
+def as_action_set(value: Any) -> set[str]:
+    """Decode canonical and static-ConvAgent allowed action annotations."""
+    if value is None:
+        return set()
+    if isinstance(value, (list, tuple, set)):
+        values = value
+    else:
+        values = [value]
+    return {
+        as_text(item).strip().lower()
+        for item in values
+        if as_text(item).strip().lower() in {"answer", "clarify", "nonanswer"}
+    }
+
+
 def extract_last_answer(raw_response: Any) -> str:
     matches = ANSWER_PATTERN.findall(as_text(raw_response))
     return matches[-1].strip() if matches else ""
@@ -262,12 +277,12 @@ def main() -> None:
         ground_truth_passages = (
             ground_truth_passage_texts if retrieval_match_mode == "passage_text" else ground_truth_passage_ids
         )
-        expected_action = as_text(row.get("expected_action", "")).strip().lower()
+        expected_actions = as_action_set(row.get("expected_action"))
         predicted_action = as_text(row.get("predicted_action", "")).strip().lower()
-        format_valid = bool(row.get("format_valid", False)) if expected_action else None
+        format_valid = bool(row.get("format_valid", False)) if expected_actions else None
         action_correct = (
-            bool(format_valid and predicted_action == expected_action)
-            if expected_action in {"answer", "clarify", "nonanswer"}
+            bool(format_valid and predicted_action in expected_actions)
+            if expected_actions
             else None
         )
         per_sample.append(
@@ -292,7 +307,7 @@ def main() -> None:
                     ground_truth_passages,
                     match_by_text=retrieval_match_mode == "passage_text",
                 ),
-                "expected_action": expected_action or None,
+                "expected_action": sorted(expected_actions) or None,
                 "predicted_action": predicted_action or None,
                 "format_valid": format_valid,
                 "action_accuracy": float(action_correct) if action_correct is not None else None,
@@ -328,7 +343,10 @@ def main() -> None:
     answer_labeled = [
         record
         for record in per_sample
-        if record["expected_action"] in {None, "answer"} and bool(record["ground_truth_answer"])
+        if (
+            record["expected_action"] is None
+            or "answer" in record["expected_action"]
+        ) and bool(record["ground_truth_answer"])
     ]
     simulated_user_records = [
         record for record in per_sample if record["evaluation_mode"] == "simulated_user"
@@ -408,7 +426,7 @@ def main() -> None:
         "f1": "Answer-only token-set F1 of the terminal valid <answer>, otherwise the last valid answer in the same sub-task; no valid answer is 0.",
         "bertscore_f1": "Answer-only BERTScore F1 using the same terminal-or-last-valid answer fallback; no valid answer or empty label is 0.",
         "ndcg_at_3": "Answer-only binary NDCG@3. TopiOCQA uses normalized exact passage-text matching because its source and retriever IDs differ; other datasets use strict passage-ID matching. Empty labels are 0.",
-        "action_accuracy": "Exact expected answer/clarify/nonanswer terminal-tag accuracy on action-labelled datasets only.",
+        "action_accuracy": "Terminal action accuracy on action-labelled datasets; static ConvAgent rows may define a set of permissible actions.",
     }
     if simulated_user_records:
         metric_definitions.update(

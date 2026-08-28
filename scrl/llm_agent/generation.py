@@ -28,7 +28,11 @@ from scrl.llm_agent.tensor_helper import TensorHelper, TensorConfig
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.utils.torch_functional import get_response_mask, pad_2d_list_to_length
-from verl.utils.reward_score.ground_truth import select_answer_ground_truth
+from verl.utils.reward_score.ground_truth import (
+    select_answer_ground_truth,
+    select_static_convagent_answer_ground_truth_with_passage_ids,
+)
+from verl.utils.reward_score.static_convagent import direct_evidence_coverage
 import numpy as np
 import traceback
 import torch.nn.functional as F
@@ -74,6 +78,12 @@ class GenerationConfig:
     max_model_len: Optional[int] = None
     max_response_length: int = 512
     context_safety_margin: int = 32
+    # Static ConvAgent data carries its own <search>/<information> prompt
+    # grammar. Keep it separate from InteractiveChat-R1's tool-call grammar.
+    static_convagent_mode: bool = False
+    # Direct passage coverage reward used by the static ConvAgent baseline.
+    static_convagent_direct_evidence_reward: bool = False
+    static_convagent_short_answer_tokens: int = 4
     
 
 class LLMGenerationManager:
@@ -89,7 +99,10 @@ class LLMGenerationManager:
         self.actor_rollout_wg = actor_rollout_wg
         self.config = config
         self.is_validation = is_validation
-        self.system_prompt = config.system_prompt or ""
+        # ConvAgent's static Parquet contains the complete task instruction,
+        # including the <search> / <information> protocol. Do not prepend the
+        # InteractiveChat-R1 tool-call prompt in this mode.
+        self.system_prompt = "" if config.static_convagent_mode else (config.system_prompt or "")
         if config.allow_nonanswer:
             # The base prompt says there are two forms. This appended instruction
             # deliberately overrides that wording only for action-labelled data.
@@ -459,10 +472,15 @@ class LLMGenerationManager:
             has_answer = "<answer>" in content or "</answer>" in content
             has_nonanswer = "<nonanswer>" in content or "</nonanswer>" in content
             has_tool_call = "<tool_call>" in content or "</tool_call>" in content
+            has_search = "<search>" in content or "</search>" in content
+            has_clarify = "<clarify>" in content or "</clarify>" in content
+            action_flags = (has_answer, has_nonanswer, has_tool_call)
+            if self.config.static_convagent_mode:
+                action_flags = (has_answer, has_nonanswer, has_search, has_clarify)
 
             # A response may contain exactly one action form. In particular,
             # answer/nonanswer cannot be combined in one terminal turn.
-            if not has_think or sum((has_answer, has_nonanswer, has_tool_call)) != 1:
+            if not has_think or sum(action_flags) != 1:
                 results.append((True, "", ""))
                 continue
 
@@ -473,6 +491,15 @@ class LLMGenerationManager:
                     continue
                 answer = content.split("<answer>", 1)[1].split("</answer>", 1)[0]
                 results.append((True, think_content, answer))
+            elif has_clarify and self.config.static_convagent_mode:
+                if "<clarify>" not in content or "</clarify>" not in content:
+                    results.append((True, "", ""))
+                    continue
+                clarification = content.split("<clarify>", 1)[1].split("</clarify>", 1)[0]
+                if clarification.strip():
+                    results.append((True, think_content, clarification))
+                else:
+                    results.append((True, "", ""))
             elif has_nonanswer:
                 if (
                     not self.config.allow_nonanswer
@@ -486,6 +513,21 @@ class LLMGenerationManager:
                     results.append((True, "", ""))
                 else:
                     results.append((True, think_content, ""))
+            elif has_search and self.config.static_convagent_mode:
+                if "<search>" not in content or "</search>" not in content:
+                    results.append((True, "", ""))
+                    continue
+                query = content.split("<search>", 1)[1].split("</search>", 1)[0].strip()
+                if not query:
+                    results.append((True, "", ""))
+                    continue
+                results.append(
+                    (
+                        False,
+                        think_content,
+                        {"name": "web_search", "arguments": {"query": [query]}},
+                    )
+                )
             elif has_tool_call and self.codeact_env_disabled:
                 if "<tool_call>" not in content or "</tool_call>" not in content:
                     results.append((True, "", ""))
@@ -707,7 +749,12 @@ class LLMGenerationManager:
             # candidates.  IGPO uses the first answer candidate; samples with
             # no answer candidate deliberately have an empty target and receive
             # no outcome or information-gain reward.
-            gt['ground_truth'] = select_answer_ground_truth(gt.get('ground_truth', ''))
+            if self.config.static_convagent_mode:
+                gt['ground_truth'] = select_static_convagent_answer_ground_truth_with_passage_ids(
+                    gt.get('ground_truth', '')
+                )[0]
+            else:
+                gt['ground_truth'] = select_answer_ground_truth(gt.get('ground_truth', ''))
             if "<|answer_split|>" in gt['ground_truth']:
                 gt['ground_truth'] = gt['ground_truth'].split("<|answer_split|>")[0]
             _gt = gt['ground_truth'].strip()
@@ -842,6 +889,10 @@ class LLMGenerationManager:
         # non-finite score). It must keep its turn boundary, but must not
         # participate in query-semantic normalization.
         info_gain_query_eligible = [[] for _ in range(len(messages_list))]
+        # For the static ConvAgent baseline, direct top-k evidence coverage is
+        # known as soon as a search has executed. It replaces legacy frozen
+        # likelihood-difference IG after the rollout is serialized.
+        direct_evidence_rewards = [[] for _ in range(len(messages_list))]
         first_retrieved_passages = [[] for _ in range(len(messages_list))]
         # One entry per completed tool action. ``None`` deliberately marks an
         # invalid/non-search action so positional alignment is never silently
@@ -1238,15 +1289,43 @@ class LLMGenerationManager:
                     or not isinstance(tool_call, dict)
                     or tool_call.get("name") != "web_search"
                 ):
-                    continue
-                first_retrieved_passages[sample_idx] = self._extract_top_retrieved_passages(
-                    tool_result.get("content")
-                )
+                    retrieved_passages = self._extract_top_retrieved_passages(tool_result.get("content"))
+                else:
+                    retrieved_passages = self._extract_top_retrieved_passages(tool_result.get("content"))
+                    first_retrieved_passages[sample_idx] = retrieved_passages
+
+                if self.config.static_convagent_direct_evidence_reward:
+                    gold_answer = ground_truths_rolling[sample_idx].get("ground_truth", "")
+                    coverage = direct_evidence_coverage(
+                        gold_answer,
+                        retrieved_passages,
+                        short_answer_token_threshold=self.config.static_convagent_short_answer_tokens,
+                    )
+                    direct_evidence_rewards[sample_idx].append(float(coverage))
             for i in range(len(tool_call_list)):
                 escaped_observation = self._escape_tool_observation(
                     tool_call_list[i].get("content", "")
                 )
-                if not self.codeact_env_disabled:  # code act enabled
+                if self.config.static_convagent_mode:
+                    query = self._canonicalize_search_action(
+                        tool_call_list[i].get("tool_call", {})
+                    ) or ""
+                    messages_list[tool_call_list[i]['idx']].append(
+                        {
+                            "role": "assistant",
+                            "content": (
+                                "<think>" + tool_call_list[i]['think'] + "</think>\n"
+                                "<search>" + query + "</search>"
+                            ),
+                        }
+                    )
+                    messages_list[tool_call_list[i]['idx']].append(
+                        {
+                            "role": "user",
+                            "content": "<information>" + escaped_observation + "</information>",
+                        }
+                    )
+                elif not self.codeact_env_disabled:  # code act enabled
                     messages_list[tool_call_list[i]['idx']].append(
                         {
                             "role": "assistant", 
@@ -1569,6 +1648,23 @@ class LLMGenerationManager:
         # gt_log_probs_path = os.path.join(output_dir, f"gt_log_probs_{global_steps}.json")
         # with open(gt_log_probs_path, 'w') as f:
         #     json.dump({"gt_log_probs_per_turn": gt_log_probs_per_turn, "gt_entropys_per_turn": gt_entropys_per_turn}, f)
+
+        if self.config.static_convagent_direct_evidence_reward:
+            # The direct evidence reward is intentionally not a likelihood
+            # delta. One value belongs to each executed <search> action and is
+            # later normalized as the intermediate reward channel by GRPO.
+            info_gain_rewards = direct_evidence_rewards
+            info_gain_query_eligible = [
+                [True] * len(rewards) for rewards in direct_evidence_rewards
+            ]
+            rewrite_bound_rewards = [
+                [None] * len(rewards) for rewards in direct_evidence_rewards
+            ]
+            print(
+                "[StaticConvAgent] direct evidence rewards: "
+                f"{sum(len(rewards) for rewards in direct_evidence_rewards)} search actions",
+                flush=True,
+            )
 
         if activate_list != []:
             for i in activate_list:

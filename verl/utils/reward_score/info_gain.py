@@ -4,9 +4,9 @@ import difflib
 import string
 import json
 import os
-from .ground_truth import select_answer_ground_truth
+from .ground_truth import select_answer_ground_truth, select_static_convagent_answer_ground_truth_with_passage_ids
 
-def check_tags_balance(solution_str: str) -> bool:
+def check_tags_balance(solution_str: str, *, allow_clarify: bool = False, allow_search: bool = False) -> bool:
     """Check if tags are properly paired
     
     Args:
@@ -17,6 +17,10 @@ def check_tags_balance(solution_str: str) -> bool:
     """
     # Tag pairs to check
     tags_to_check = ['code', 'tool_call', 'think', 'answer', 'nonanswer']
+    if allow_clarify:
+        tags_to_check.append('clarify')
+    if allow_search:
+        tags_to_check.append('search')
     
     for tag in tags_to_check:
         # Count start and end tags
@@ -45,14 +49,25 @@ def check_tags_balance(solution_str: str) -> bool:
             
     return True
 
-def extract_terminal_action(solution_str: str) -> tuple[str, bool]:
+def extract_terminal_action(
+    solution_str: str,
+    *,
+    allow_clarify: bool = False,
+    allow_search: bool = False,
+) -> tuple[str, bool]:
     """Parse the final assistant action without scoring its answer text.
 
-    ``answer`` and empty ``nonanswer`` are the only valid terminal actions.
+    ``answer`` and empty ``nonanswer`` are normally the only valid terminal
+    actions. Static ConvAgent evaluation additionally permits a non-empty
+    ``clarify`` terminal action.
     The parser intentionally examines only the final assistant turn, so prior
     tool calls cannot be mistaken for a terminal prediction.
     """
-    if not check_tags_balance(solution_str):
+    if not check_tags_balance(
+        solution_str,
+        allow_clarify=allow_clarify,
+        allow_search=allow_search,
+    ):
         return "invalid", False
 
     final_turn = solution_str.rsplit("\n<|im_start|>assistant\n", 1)[-1]
@@ -61,10 +76,15 @@ def extract_terminal_action(solution_str: str) -> tuple[str, bool]:
 
     answer_matches = list(re.finditer(r"<answer>(.*?)</answer>", final_turn, re.DOTALL))
     nonanswer_matches = list(re.finditer(r"<nonanswer>(.*?)</nonanswer>", final_turn, re.DOTALL))
-    if len(answer_matches) + len(nonanswer_matches) != 1:
+    clarify_matches = list(re.finditer(r"<clarify>(.*?)</clarify>", final_turn, re.DOTALL))
+    if len(answer_matches) + len(nonanswer_matches) + len(clarify_matches) != 1:
         return "invalid", False
     if answer_matches:
         return "answer", True
+    if clarify_matches:
+        if not allow_clarify or not clarify_matches[0].group(1).strip():
+            return "invalid", False
+        return "clarify", True
     if nonanswer_matches[0].group(1).strip():
         return "invalid", False
     return "nonanswer", True
@@ -97,8 +117,13 @@ def deal_multi_labels(ground_truth):
 
 
 
-def compute_f1(solution_str, ground_truth, data_source, val_type='f1') -> float:
-    ground_truth = select_answer_ground_truth(ground_truth, data_source=data_source)
+def compute_f1(solution_str, ground_truth, data_source, val_type='f1', static_convagent_mode: bool = False) -> float:
+    if static_convagent_mode:
+        ground_truth = select_static_convagent_answer_ground_truth_with_passage_ids(
+            ground_truth, data_source=data_source
+        )[0]
+    else:
+        ground_truth = select_answer_ground_truth(ground_truth, data_source=data_source)
     # Empty targets are deliberately unsupervised: they contribute no F1/EM
     # or policy reward.
     if not ground_truth.strip():
@@ -109,14 +134,18 @@ def compute_f1(solution_str, ground_truth, data_source, val_type='f1') -> float:
     solution_str = solution_str.lower()
     ground_truth = ground_truth.lower()
     ground_truths = ground_truth.split("<|answer_split|>")
-    terminal_action, format_valid = extract_terminal_action(solution_str)
+    terminal_action, format_valid = extract_terminal_action(
+        solution_str,
+        allow_clarify=static_convagent_mode,
+        allow_search=static_convagent_mode,
+    )
     if not format_valid:
         return 0.0 if val_type == 'noformatf1' else -2.0
 
     # A syntactically valid nonanswer action is not a formatting failure. It
     # receives zero textual F1; the independent action-reward channel handles
     # whether this was the correct terminal action for the sample.
-    if terminal_action == 'nonanswer':
+    if terminal_action in {'nonanswer', 'clarify'}:
         return 0.0
 
     try:
@@ -183,7 +212,16 @@ def _char_pos_to_token_idx(char_pos, offset_mapping):
     return len(offset_mapping) - 1
 
 
-def compute_score(solution_str, ground_truth, data_source, val_type='f1', info_gain_reward=[], tokenizer=None, is_validation=False):
+def compute_score(
+    solution_str,
+    ground_truth,
+    data_source,
+    val_type='f1',
+    info_gain_reward=[],
+    tokenizer=None,
+    is_validation=False,
+    static_convagent_mode: bool = False,
+):
     """
     Compute token-level reward scores
     
@@ -205,17 +243,30 @@ def compute_score(solution_str, ground_truth, data_source, val_type='f1', info_g
     if tokenizer is None:
         raise ValueError("tokenizer cannot be None")
 
-    ground_truth = select_answer_ground_truth(ground_truth, data_source=data_source)
+    if static_convagent_mode:
+        ground_truth = select_static_convagent_answer_ground_truth_with_passage_ids(
+            ground_truth, data_source=data_source
+        )[0]
+    else:
+        ground_truth = select_answer_ground_truth(ground_truth, data_source=data_source)
         
     alpha = 1.0
 
     # Compute F1/EM scores
     if is_validation:
-        f1_score = compute_f1(solution_str, ground_truth, data_source, val_type='f1')
-        em_score = compute_f1(solution_str, ground_truth, data_source, val_type='em')
-        noformatf1_score = compute_f1(solution_str, ground_truth, data_source, val_type='noformatf1')
+        f1_score = compute_f1(
+            solution_str, ground_truth, data_source, val_type='f1', static_convagent_mode=static_convagent_mode
+        )
+        em_score = compute_f1(
+            solution_str, ground_truth, data_source, val_type='em', static_convagent_mode=static_convagent_mode
+        )
+        noformatf1_score = compute_f1(
+            solution_str, ground_truth, data_source, val_type='noformatf1', static_convagent_mode=static_convagent_mode
+        )
     else:
-        f1_score = compute_f1(solution_str, ground_truth, data_source, val_type)
+        f1_score = compute_f1(
+            solution_str, ground_truth, data_source, val_type, static_convagent_mode=static_convagent_mode
+        )
     
     # Use offset_mapping to get precise token-character position mapping
     encoding = tokenizer(solution_str, return_offsets_mapping=True, add_special_tokens=False)

@@ -18,7 +18,10 @@ import torch
 import json
 from verl import DataProto
 from verl.utils.reward_score import _default_compute_score
-from verl.utils.reward_score.ground_truth import select_expected_action
+from verl.utils.reward_score.ground_truth import (
+    select_expected_action,
+    select_static_convagent_expected_actions,
+)
 from verl.utils.reward_score.info_gain import extract_terminal_action
 
 
@@ -32,6 +35,8 @@ class NaiveRewardManager:
         compute_score=None,
         reward_fn_key="data_source",
         use_action_reward: bool = False,
+        static_convagent_mode: bool = False,
+        action_incorrect_reward: float = -1.0,
     ) -> None:
         self.tokenizer = tokenizer
         self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
@@ -40,6 +45,8 @@ class NaiveRewardManager:
         # Terminal-action supervision is an experiment-level switch. Both
         # baseline IGPO and Rewrite-Bound enable it for a fair comparison.
         self.use_action_reward = use_action_reward
+        self.static_convagent_mode = static_convagent_mode
+        self.action_incorrect_reward = float(action_incorrect_reward)
 
     def __call__(self, data: DataProto, return_dict=False, val_type='f1', info_gain_rewards=None, is_validation=False):
         """We will expand this function gradually based on the available datasets"""
@@ -92,11 +99,24 @@ class NaiveRewardManager:
             action_reward = None
             action_correct = None
             if self.use_action_reward:
-                expected_action = select_expected_action(reward_model, data_source=data_source)
-                predicted_action, format_valid = extract_terminal_action(response_str)
-                if expected_action is not None:
-                    action_correct = bool(format_valid and predicted_action == expected_action)
-                    action_reward = 1.0 if action_correct else -1.0
+                if self.static_convagent_mode:
+                    expected_action = sorted(
+                        select_static_convagent_expected_actions(reward_model, data_source=data_source)
+                    )
+                    predicted_action, format_valid = extract_terminal_action(
+                        response_str,
+                        allow_clarify=True,
+                        allow_search=True,
+                    )
+                    if expected_action:
+                        action_correct = bool(format_valid and predicted_action in expected_action)
+                        action_reward = 1.0 if action_correct else self.action_incorrect_reward
+                else:
+                    expected_action = select_expected_action(reward_model, data_source=data_source)
+                    predicted_action, format_valid = extract_terminal_action(response_str)
+                    if expected_action is not None:
+                        action_correct = bool(format_valid and predicted_action == expected_action)
+                        action_reward = 1.0 if action_correct else self.action_incorrect_reward
                 # Preserve one slot per sample. ``None`` marks unsupported
                 # InSCIt clarification examples and is ignored downstream.
                 reward_extra_info["action_rewards"].append(action_reward)
@@ -116,6 +136,7 @@ class NaiveRewardManager:
                 info_gain_reward=info_gain_reward,
                 tokenizer=self.tokenizer,
                 is_validation=is_validation,
+                static_convagent_mode=self.static_convagent_mode,
             )
 
             if is_validation:

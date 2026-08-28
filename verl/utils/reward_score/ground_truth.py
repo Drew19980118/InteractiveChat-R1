@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from .static_convagent import static_convagent_allowed_actions, static_convagent_answer_and_passage_ids
+
 
 def _normalize_passage_ids(value: Any) -> list[str]:
     """Return a JSON/Parquet-friendly list for one answer candidate."""
@@ -157,3 +159,22 @@ def select_answer_ground_truth(ground_truth: Any, data_source: Any = None) -> st
     Existing datasets already store a string and pass through unchanged.
     """
     return select_answer_ground_truth_with_passage_ids(ground_truth, data_source=data_source)[0]
+
+
+def select_static_convagent_answer_ground_truth_with_passage_ids(
+    ground_truth: Any,
+    data_source: Any = None,
+) -> tuple[str, list[str]]:
+    """Select the static ConvAgent answer target.
+
+    Unlike the interactive conversion, static ConvAgent rows with both answer
+    and clarification candidates remain answer-supervised.  The action reward
+    separately recognises every candidate action as valid.
+    """
+    del data_source  # Kept for the same call signature as the interactive helper.
+    return static_convagent_answer_and_passage_ids(ground_truth)
+
+
+def select_static_convagent_expected_actions(ground_truth: Any, data_source: Any = None) -> set[str]:
+    """Return the permissible static ConvAgent terminal actions for one row."""
+    return static_convagent_allowed_actions(ground_truth, data_source=data_source)
