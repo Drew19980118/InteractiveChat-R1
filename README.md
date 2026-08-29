@@ -70,8 +70,9 @@ InteractiveChat-R1/
 │   ├── run_local_retriever_server.sh     # FAISS /retrieve service
 │   ├── run_user_simulator_server.sh      # frozen Qwen32B OpenAI-compatible server
 │   ├── run_{inscit,qrecc}_{3b,7b}_full_train.sh
-│   ├── run_inscit_3b_{wo_satisfaction_reward,wo_user_feedback,wo_patience_penalty}_train.sh
+│   ├── run_inscit_3b_{wo_satisfaction_reward,wo_user_feedback,wo_patience_penalty,wo_clarity_reward}_train.sh
 │   ├── run_inscit_3b_ablation_suite.sh
+│   ├── run_inscit_3b_static_baselines_then_wo_clarity_suite.sh
 │   ├── prepare_static_convagent_monitor_split.py
 │   ├── run_static_convagent_{inscit,qrecc}_suite.sh
 │   ├── run_static_convagent_train.sh / run_static_convagent_eval.sh
@@ -707,6 +708,7 @@ clarification-F1 remain active.
 | `w/o satisfaction reward` | user feedback and answer-only retries | clarity and patience | satisfaction rate, retry depth |
 | `w/o user feedback` | dynamic model-generated context and fallback only; no feedback/retry | clarity and patience | one hidden, non-interactive simulator judgement per answer; satisfaction rate only |
 | `w/o patience penalty` | user feedback and answer-only retries | patience only | satisfaction rate, retry depth |
+| `w/o level-wise satisfaction reward (patience-only)` | user feedback and answer-only retries | clarity only | satisfaction rate, retry depth |
 
 In particular, **w/o user feedback is not a static-gold-prefix baseline**:
 sub-task \(t+1\) still receives the policy's public answer from \(t\), or the
@@ -732,6 +734,49 @@ tail -f logs/interactivechat_r1_inscit_3b_ablation_suite.log
 The three runs write independent checkpoints, rollout traces, validation JSONL
 files, and `metrics_summary.json` files beneath `outputs/inscit/` and
 `eval_log/inscit/`, using the respective experiment names from their launcher.
+
+### Serial static-baseline and patience-only comparison
+
+The following launcher runs three **InsCiT Qwen2.5-3B** experiments in order:
+
+1. static ConvAgent-style training and selected-checkpoint evaluation on the
+   InsCiT static test set;
+2. static ChatR1-style training and selected-checkpoint evaluation on the
+   InsCiT static test set;
+3. the online `w/o level-wise satisfaction reward (patience-only)` ablation,
+   including its final full dynamic InsCiT validation.
+
+Keep the retriever on the InsCiT collection for the entire suite.  The final
+online ablation additionally requires the frozen user simulator on port 8010.
+The static baselines perform holdout monitoring and select one final checkpoint
+automatically; the online ablation follows the 15-step, 128-context, 8-rollout
+recipe used by the full method.
+
+```bash
+mkdir -p logs
+
+nohup env \
+  CUDA_VISIBLE_DEVICES=2,3 \
+  N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
+  MODEL_PATH=$PWD/models/Qwen2.5-3B-Instruct \
+  MODEL_TAG=qwen25_3b \
+  USER_SIMULATOR_BASE_URL=http://127.0.0.1:8010 \
+  USER_SIMULATOR_MODEL=qwen32b-user-simulator \
+  INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
+  bash scripts/run_inscit_3b_static_baselines_then_wo_clarity_suite.sh \
+  > logs/inscit_3b_static_baselines_then_wo_clarity.log 2>&1 &
+
+tail -f logs/inscit_3b_static_baselines_then_wo_clarity.log
+```
+
+The three metric summaries are printed at the end of the log.  The individual
+launchers remain available when only one experiment needs to be rerun:
+
+```bash
+bash scripts/run_static_convagent_inscit_suite.sh
+bash scripts/run_static_chatr1_inscit_suite.sh
+bash scripts/run_inscit_3b_wo_clarity_reward_train.sh
+```
 
 ### Resume an interrupted run
 
