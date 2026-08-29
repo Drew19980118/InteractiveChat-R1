@@ -137,7 +137,7 @@ python -u -m verl.trainer.main_ppo \
   "critic.ppo_micro_batch_size_per_gpu=1" \
   "algorithm.adv_estimator=grpo" \
   "algorithm.gamma=1.0" \
-  "algorithm.info_gain_norm_mode=separate" \
+  "+algorithm.info_gain_norm_mode=separate" \
   "algorithm.query_group_advantage=disabled" \
   "algorithm.max_search_queries=1" \
   "algorithm.allow_nonanswer_action=false" \
