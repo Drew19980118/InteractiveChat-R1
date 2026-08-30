@@ -14,7 +14,26 @@
 # from . import gsm8k, math, prime_math, prime_code
 import json
 
-def _default_compute_score(data_source, prompt_str, solution_str, ground_truth, extra_info=None, val_type='f1', info_gain_reward=None, batch_size=1, tokenizer=None, is_validation=False):
+def _default_compute_score(
+    data_source,
+    prompt_str,
+    solution_str,
+    ground_truth,
+    extra_info=None,
+    val_type='f1',
+    info_gain_reward=None,
+    batch_size=1,
+    tokenizer=None,
+    is_validation=False,
+    static_convagent_mode: bool = False,
+    static_chatr1_mode: bool = False,
+):
+    """Dispatch reward scoring while preserving static-baseline mode flags.
+
+    ``NaiveRewardManager`` always owns the static ConvAgent/ChatR1 switches.
+    They must reach the information-gain scorer so it can canonicalize the
+    released static labels and parse the corresponding action grammar.
+    """
     if type(data_source) != str:
         reslist = []
         if val_type == 'llm':
@@ -25,7 +44,17 @@ def _default_compute_score(data_source, prompt_str, solution_str, ground_truth, 
             for data_source_e,solution_str_e,ground_truth_e in zip(data_source, solution_str, ground_truth):
                 if data_source_e in ['nq', "2wiki", "Bamboogle", "hotpotqa", "musique", "tq", "popqa","browse_comp", "browse_comp_zh", "xbench_deepsearch","hotpot","zhihu", "inscit", "coral", "qrecc", "topiocqa"]:
                     from . import info_gain
-                    res = info_gain.compute_score(solution_str_e, ground_truth_e, data_source, val_type=val_type, info_gain_reward=info_gain_reward, tokenizer=tokenizer, is_validation=is_validation)
+                    res = info_gain.compute_score(
+                        solution_str_e,
+                        ground_truth_e,
+                        data_source_e,
+                        val_type=val_type,
+                        info_gain_reward=info_gain_reward,
+                        tokenizer=tokenizer,
+                        is_validation=is_validation,
+                        static_convagent_mode=static_convagent_mode,
+                        static_chatr1_mode=static_chatr1_mode,
+                    )
                     reslist.append(res)
                 elif data_source_e in ['future']:
                     from . import stock_judge
@@ -79,7 +108,17 @@ def _default_compute_score(data_source, prompt_str, solution_str, ground_truth, 
             res = geo3k.compute_score(solution_str, ground_truth)
         elif data_source in ['elobench', 'Factbench', 'nq', "2wiki", "Bamboogle", "hotpotqa", "musique", "tq", "popqa", "browse_comp", "browse_comp_zh", "xbench_deepsearch","hotpot","zhihu", "inscit", "coral", "qrecc", "topiocqa"]:
             from . import info_gain
-            res = info_gain.compute_score(solution_str, ground_truth, data_source, val_type=val_type, info_gain_reward=info_gain_reward, tokenizer=tokenizer, is_validation=is_validation)
+            res = info_gain.compute_score(
+                solution_str,
+                ground_truth,
+                data_source,
+                val_type=val_type,
+                info_gain_reward=info_gain_reward,
+                tokenizer=tokenizer,
+                is_validation=is_validation,
+                static_convagent_mode=static_convagent_mode,
+                static_chatr1_mode=static_chatr1_mode,
+            )
         elif data_source in ['politifact', 'liar2', 'elobench', 'Chinese_Rumor_Dataset', 'fever', 'lair', 'MDFEND-Weibo21', 'twitter_factchecking_test', 'factchecker_history', 'health_fact']:
             from . import fact_test
             res = fact_test.compute_score(solution_str, ground_truth, data_source, val_type=val_type, info_gain_reward=info_gain_reward)
