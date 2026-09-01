@@ -73,6 +73,7 @@ InteractiveChat-R1/
 │   ├── run_inscit_3b_{wo_satisfaction_reward,wo_user_feedback,wo_patience_penalty,wo_clarity_reward}_train.sh
 │   ├── run_inscit_3b_ablation_suite.sh
 │   ├── run_inscit_3b_static_baselines_then_wo_clarity_suite.sh
+│   ├── run_inscit_7b_static_baselines_suite.sh
 │   ├── prepare_static_convagent_monitor_split.py
 │   ├── run_static_convagent_{inscit,qrecc}_suite.sh
 │   ├── run_static_convagent_train.sh / run_static_convagent_eval.sh
@@ -776,6 +777,35 @@ launchers remain available when only one experiment needs to be rerun:
 bash scripts/run_static_convagent_inscit_suite.sh
 bash scripts/run_static_chatr1_inscit_suite.sh
 bash scripts/run_inscit_3b_wo_clarity_reward_train.sh
+```
+
+### Serial 7B static-baseline comparison
+
+To run only the two static baselines with **Qwen2.5-7B** under exactly the
+same static training, monitor-selection, retrieval, and source-test settings
+as the 3B runs, keep the retriever on the InsCiT collection and launch:
+
+```bash
+mkdir -p logs
+
+nohup env \
+  CUDA_VISIBLE_DEVICES=2,3 \
+  N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
+  MODEL_PATH=$PWD/models/Qwen2.5-7B-Instruct \
+  MODEL_TAG=qwen25_7b \
+  INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
+  bash scripts/run_inscit_7b_static_baselines_suite.sh \
+  > logs/inscit_7b_static_baselines.log 2>&1 &
+
+tail -f logs/inscit_7b_static_baselines.log
+```
+
+The run is strictly serial: ConvAgent completes training and InsCiT static
+evaluation before ChatR1 starts.  Its summaries are written to:
+
+```text
+eval_log/static_convagent/static_convagent_inscit_qwen25_7b_to_inscit/metrics_summary.json
+eval_log/static_chatr1/static_chatr1_inscit_qwen25_7b_to_inscit/metrics_summary.json
 ```
 
 ### Resume an interrupted run
