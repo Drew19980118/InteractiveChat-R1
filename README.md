@@ -867,6 +867,53 @@ eval_log/static_convagent/static_convagent_inscit_qwen25_7b_to_inscit/metrics_su
 eval_log/static_chatr1/static_chatr1_inscit_qwen25_7b_to_inscit/metrics_summary.json
 ```
 
+#### Optional: export and upload each selected 7B actor
+
+The same serial launcher can export each selected final checkpoint immediately
+after its source InsCiT validation, then upload only the actor-only BF16 model
+to the Hub before starting the next baseline.  It never uploads the full
+resumable FSDP checkpoint.  A 7B actor-only export is typically about 14--16
+GB, while the corresponding training checkpoint is much larger.
+
+First authenticate with the Hugging Face account that will be credited for the
+upload.  If a collaborator performs this step, the target must be an
+organization repository for which they have the **Write** role.
+
+```bash
+hf auth login
+hf auth whoami 2>/dev/null || hf whoami
+```
+
+Set the two repository IDs explicitly.  The command below performs this exact
+order: ConvAgent train -> InsCiT validate -> export -> upload, then ChatR1
+train -> InsCiT validate -> export -> upload.  `hf upload-large-folder` is
+resumable if a network interruption occurs.
+
+```bash
+mkdir -p logs
+
+nohup env \
+  CUDA_VISIBLE_DEVICES=2,3 \
+  N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
+  MODEL_PATH=$PWD/models/Qwen2.5-7B-Instruct \
+  MODEL_TAG=qwen25_7b \
+  EXPORT_ACTOR_ONLY=true \
+  HF_UPLOAD_ACTOR_ONLY=true \
+  HF_CONVAGENT_REPO_ID=InteractiveChat-R1/static-convagent-inscit-qwen25-7b \
+  HF_CHATR1_REPO_ID=InteractiveChat-R1/static-chatr1-inscit-qwen25-7b \
+  HF_UPLOAD_NUM_WORKERS=8 \
+  INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
+  bash scripts/run_inscit_7b_static_baselines_suite.sh \
+  > logs/inscit_7b_static_baselines_export_upload.log 2>&1 &
+
+tail -f logs/inscit_7b_static_baselines_export_upload.log
+```
+
+Replace `InteractiveChat-R1` by the actual Hugging Face organization or
+`DrewZhang` if you, rather than a collaborator, own the destination namespace.
+To export locally without an upload, set only `EXPORT_ACTOR_ONLY=true`; the
+two actor directories are then placed under `exports/`.
+
 ### Resume an interrupted run
 
 The checkpoint `global_step_9` means the completed updates are 0–9.  Resume to a total of 15 steps as follows:
