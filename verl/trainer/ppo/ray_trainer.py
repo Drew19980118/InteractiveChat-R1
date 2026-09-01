@@ -1788,6 +1788,25 @@ class RayPPOTrainer:
         # load checkpoint before doing anything
         loaded_checkpoint = self._load_checkpoint()
 
+        # A full FSDP PPO checkpoint is needed to reconstruct the actor state,
+        # but optimizer/RNG/critic shards are unnecessary for inference-only
+        # reuse.  Export immediately after loading, before any rollout or
+        # validation can change the policy.
+        actor_export_path = self.config.trainer.get("export_actor_hf_path", None)
+        if actor_export_path:
+            if not loaded_checkpoint:
+                raise ValueError(
+                    "trainer.export_actor_hf_path requires trainer.resume_mode=resume_path "
+                    "and a valid full global_step_* checkpoint."
+                )
+            actor_export_max_shard_size = self.config.trainer.get("export_actor_hf_max_shard_size", "2GB")
+            self.actor_rollout_wg.export_actor_hf(
+                actor_export_path,
+                max_shard_size=actor_export_max_shard_size,
+            )
+            print(f"Actor-only export completed: {actor_export_path}")
+            return
+
         # perform validation before training
         # currently, we only support validation using the reward_function.
         if (self.val_reward_fn is not None or self._simulated_user_enabled()) and self.config.trainer.get("val_before_train", True):

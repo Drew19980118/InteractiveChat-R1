@@ -7,8 +7,6 @@ cd "$PROJECT_ROOT"
 
 : "${TRAIN_DATASET:?Set TRAIN_DATASET to inscit or qrecc.}"
 : "${EVAL_DATASET:?Set EVAL_DATASET to inscit, topiocqa, qrecc, or coral.}"
-: "${MODEL_PATH:?Set MODEL_PATH to the same base Qwen2.5 Instruct model directory.}"
-: "${CHECKPOINT_PATH:?Set CHECKPOINT_PATH to the selected global_step_* directory.}"
 : "${CUDA_VISIBLE_DEVICES:?Reserve validation GPUs through CUDA_VISIBLE_DEVICES.}"
 
 case "$TRAIN_DATASET" in inscit|qrecc) ;; *) echo "ERROR: TRAIN_DATASET must be inscit or qrecc." >&2; exit 2;; esac
@@ -29,6 +27,11 @@ STATIC_SPLIT_DIR="${STATIC_SPLIT_DIR:-$PROJECT_ROOT/data/static_convagent_splits
 TRAIN_FILE="${TRAIN_FILE:-$STATIC_SPLIT_DIR/${TRAIN_DATASET}_train.parquet}"
 VAL_FILE="${VAL_FILE:-$STATIC_SOURCE_ROOT/$EVAL_DATASET/${EVAL_DATASET}_test.parquet}"
 EXPERIMENT_NAME="${EXPERIMENT_NAME:?Set EXPERIMENT_NAME for this evaluation.}"
+CHECKPOINT_PATH="${CHECKPOINT_PATH:-}"
+MODEL_PATH="${MODEL_PATH:-}"
+# When set, bypasses FSDP resume and loads this exported actor-only Hugging
+# Face directory directly.  This is evaluation-only and cannot resume RL.
+ACTOR_ONLY_MODEL_PATH="${ACTOR_ONLY_MODEL_PATH:-}"
 
 if (( TRAIN_BATCH_SIZE != 128 || PPO_MINI_BATCH_SIZE != 64 || VAL_BATCH_SIZE != 256 )); then
   echo "ERROR: static baseline evaluation requires train_batch=128, ppo_mini_batch=64, val_batch=256." >&2
@@ -38,18 +41,35 @@ if (( N_GPUS < 1 || ULYSSES_SEQUENCE_PARALLEL_SIZE < 1 || N_GPUS % ULYSSES_SEQUE
   echo "ERROR: invalid N_GPUS / ULYSSES_SEQUENCE_PARALLEL_SIZE." >&2
   exit 2
 fi
-if [[ ! -d "$CHECKPOINT_PATH" || "$(basename "$CHECKPOINT_PATH")" != global_step_* ]]; then
-  echo "ERROR: CHECKPOINT_PATH must be an existing global_step_* directory." >&2
-  exit 2
-fi
 if [[ ! -f "$TRAIN_FILE" || ! -f "$VAL_FILE" ]]; then
   echo "ERROR: missing static parquet: TRAIN_FILE=$TRAIN_FILE VAL_FILE=$VAL_FILE" >&2
   exit 2
 fi
-EVAL_STEP="${CHECKPOINT_PATH##*global_step_}"
-if ! [[ "$EVAL_STEP" =~ ^[0-9]+$ ]]; then
-  echo "ERROR: could not parse checkpoint step from $CHECKPOINT_PATH" >&2
-  exit 2
+if [[ -n "$ACTOR_ONLY_MODEL_PATH" ]]; then
+  if [[ ! -d "$ACTOR_ONLY_MODEL_PATH" || ! -f "$ACTOR_ONLY_MODEL_PATH/config.json" ]]; then
+    echo "ERROR: ACTOR_ONLY_MODEL_PATH must be an exported Hugging Face model directory." >&2
+    exit 2
+  fi
+  MODEL_PATH="$ACTOR_ONLY_MODEL_PATH"
+  EVAL_STEP="${ACTOR_ONLY_EVAL_STEP:-0}"
+  LOAD_DESCRIPTION="actor-only HF model=$ACTOR_ONLY_MODEL_PATH"
+  RESUME_ARGS=("trainer.resume_mode=disable")
+else
+  if [[ -z "$MODEL_PATH" || ! -d "$MODEL_PATH" ]]; then
+    echo "ERROR: MODEL_PATH must be the base Qwen2.5 Instruct directory when using CHECKPOINT_PATH." >&2
+    exit 2
+  fi
+  if [[ ! -d "$CHECKPOINT_PATH" || "$(basename "$CHECKPOINT_PATH")" != global_step_* ]]; then
+    echo "ERROR: set CHECKPOINT_PATH to an existing global_step_* directory, or set ACTOR_ONLY_MODEL_PATH." >&2
+    exit 2
+  fi
+  EVAL_STEP="${CHECKPOINT_PATH##*global_step_}"
+  if ! [[ "$EVAL_STEP" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: could not parse checkpoint step from $CHECKPOINT_PATH" >&2
+    exit 2
+  fi
+  LOAD_DESCRIPTION="checkpoint=$CHECKPOINT_PATH"
+  RESUME_ARGS=("trainer.resume_mode=resume_path" "trainer.resume_from_path=$CHECKPOINT_PATH")
 fi
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
@@ -73,7 +93,7 @@ OUTPUT_DIR="$PROJECT_ROOT/outputs/static_convagent/$EXPERIMENT_NAME"
 EVAL_DIR="$PROJECT_ROOT/eval_log/static_convagent/$EXPERIMENT_NAME"
 mkdir -p "$OUTPUT_DIR" "$EVAL_DIR" "$PROJECT_ROOT/cache/task_queue"
 
-echo "[StaticConvAgent Eval] train=$TRAIN_DATASET eval=$EVAL_DATASET checkpoint=$CHECKPOINT_PATH val_batch=256"
+echo "[StaticConvAgent Eval] train=$TRAIN_DATASET eval=$EVAL_DATASET $LOAD_DESCRIPTION val_batch=256"
 
 python -u -m verl.trainer.main_ppo \
   "data.train_files=$TRAIN_FILE" \
@@ -130,8 +150,7 @@ python -u -m verl.trainer.main_ppo \
   "trainer.validation_data_dir=$EVAL_DIR" \
   "trainer.val_before_train=true" \
   "+trainer.val_only=true" \
-  "trainer.resume_mode=resume_path" \
-  "trainer.resume_from_path=$CHECKPOINT_PATH" \
+  "${RESUME_ARGS[@]}" \
   "trainer.n_gpus_per_node=$N_GPUS" \
   "trainer.nnodes=1" \
   "trainer.total_training_steps=$((EVAL_STEP + 1))" \

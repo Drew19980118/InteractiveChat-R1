@@ -346,6 +346,11 @@ trainer:
   critic_warmup: 0
   default_hdfs_dir: null
   del_local_ckpt_after_load: False
+  # Optional one-shot conversion of a loaded FSDP actor checkpoint into a
+  # standalone Hugging Face inference checkpoint.  Optimizer/critic/RNG state
+  # is deliberately excluded; set this only with resume_mode=resume_path.
+  export_actor_hf_path: null
+  export_actor_hf_max_shard_size: 2GB
   default_local_dir: ./outputs/${trainer.project_name}/${trainer.experiment_name}
   max_actor_ckpt_to_keep: null
   max_critic_ckpt_to_keep: null

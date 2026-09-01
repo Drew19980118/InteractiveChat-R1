@@ -689,6 +689,61 @@ class ActorRolloutRefWorker(Worker):
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def export_actor_hf(self, export_path: str, max_shard_size: str = "2GB"):
+        """Materialize the loaded FSDP actor as an inference-only HF checkpoint.
+
+        PPO checkpoints keep one sharded model state, optimizer state, and RNG
+        state per rank.  Evaluation-only users need only the actor weights.
+        This method must therefore run *after* ``load_checkpoint`` while the
+        original FSDP world size is available; loading one shard directly would
+        silently produce an incomplete model.
+        """
+        assert self._is_actor, "Only the actor worker can export an actor policy"
+
+        from torch.distributed.fsdp import (
+            FullStateDictConfig,
+            FullyShardedDataParallel as FSDP,
+            StateDictType,
+        )
+
+        export_path = os.path.abspath(export_path)
+        if os.path.exists(export_path) and os.listdir(export_path):
+            raise FileExistsError(
+                f"Actor-only export destination is not empty: {export_path}. "
+                "Choose a new directory so an existing export is not overwritten."
+            )
+
+        if self._is_offload_param:
+            load_fsdp_model_to_gpu(self.actor_module_fsdp)
+
+        # Rank zero receives a CPU-offloaded, unsharded state dict.  The other
+        # ranks participate in the collective but do not retain a duplicate.
+        full_state_config = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+        with FSDP.state_dict_type(
+            self.actor_module_fsdp,
+            StateDictType.FULL_STATE_DICT,
+            full_state_config,
+        ):
+            state_dict = self.actor_module_fsdp.state_dict()
+
+        if self.rank == 0:
+            os.makedirs(export_path, exist_ok=True)
+            self.actor_module.save_pretrained(
+                export_path,
+                state_dict=state_dict,
+                safe_serialization=True,
+                max_shard_size=max_shard_size,
+            )
+            processing_class = self.processor if self.processor is not None else self.tokenizer
+            processing_class.save_pretrained(export_path)
+            print(f"Exported actor-only Hugging Face checkpoint to {export_path}")
+
+        torch.distributed.barrier()
+
+        if self._is_offload_param:
+            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(self.actor_optimizer)
 

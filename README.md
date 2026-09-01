@@ -600,6 +600,65 @@ Use the 7B model path and `MODEL_TAG=qwen25_7b` to run the 7B baseline.
 Results are written under `outputs/static_chatr1/<experiment>/` and
 `eval_log/static_chatr1/<experiment>/metrics_summary.json`.
 
+#### Export an inference-only actor checkpoint
+
+The selected `global_step_*` directory is a resumable FSDP PPO checkpoint and
+therefore also contains optimizer and RNG shards.  For cross-server static
+evaluation, export only the trained actor into a standard Hugging Face BF16
+checkpoint.  The export must run once on the source server with the **same
+FSDP GPU world size used for training** (the 3B examples below use two GPUs).
+It does not generate rollouts, require the user simulator, or modify the
+source checkpoint.
+
+```bash
+# ConvAgent actor at its selected source checkpoint
+CHECKPOINT_PATH="$(< outputs/static_convagent/static_convagent_inscit_qwen25_3b/final_checkpoint.txt)" \
+TRAIN_FILE=$PWD/data/static_convagent_splits/inscit/inscit_train.parquet \
+MODEL_PATH=$PWD/models/Qwen2.5-3B-Instruct \
+ACTOR_EXPORT_DIR=$PWD/exports/static_convagent_inscit_qwen25_3b_actor_hf \
+CUDA_VISIBLE_DEVICES=2,3 N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
+INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
+bash scripts/export_actor_policy.sh
+
+# ChatR1 actor at its selected source checkpoint
+CHECKPOINT_PATH="$(< outputs/static_chatr1/static_chatr1_inscit_qwen25_3b/final_checkpoint.txt)" \
+TRAIN_FILE=$PWD/data/static_chatr1_splits/inscit/inscit_train.parquet \
+MODEL_PATH=$PWD/models/Qwen2.5-3B-Instruct \
+ACTOR_EXPORT_DIR=$PWD/exports/static_chatr1_inscit_qwen25_3b_actor_hf \
+CUDA_VISIBLE_DEVICES=2,3 N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
+INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
+bash scripts/export_actor_policy.sh
+```
+
+The destination must be new or empty.  It contains only actor model shards,
+configuration, and tokenizer files (typically about 6--8 GB for 3B), so it
+cannot resume RL training.  Upload the directory without tar compression; the
+Hugging Face CLI supports resumable multi-file uploads:
+
+```bash
+hf upload-large-folder DrewZhang/interactivechat-r1-static-convagent-inscit-3b \
+  exports/static_convagent_inscit_qwen25_3b_actor_hf --type model --num-workers 8
+```
+
+After downloading an actor-only export on another server, static evaluation
+can load it directly without the original `global_step_*` directory. Restart
+the matching target retriever first. For ConvAgent InsCiT -> TopiOCQA:
+
+```bash
+TRAIN_DATASET=inscit \
+EVAL_DATASET=topiocqa \
+ACTOR_ONLY_MODEL_PATH=/path/to/static_convagent_inscit_qwen25_3b_actor_hf \
+EXPERIMENT_NAME=static_convagent_inscit_qwen25_3b_actor_only_to_topiocqa \
+CUDA_VISIBLE_DEVICES=2,3 N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
+INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
+bash scripts/run_static_convagent_eval.sh
+```
+
+For ChatR1, use `run_static_chatr1_eval.sh` and the corresponding exported
+ChatR1 actor directory. Actor-only evaluation is inference-equivalent to the
+same full checkpoint; it merely omits optimizer, critic, scheduler, and RNG
+state.
+
 ### Canonical configuration
 
 All provided full-method training launchers use exactly the current formal setting:
