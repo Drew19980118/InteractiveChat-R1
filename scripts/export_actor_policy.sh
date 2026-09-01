@@ -19,6 +19,7 @@ ULYSSES_SEQUENCE_PARALLEL_SIZE="${ULYSSES_SEQUENCE_PARALLEL_SIZE:-$N_GPUS}"
 ACTOR_EXPORT_MAX_SHARD_SIZE="${ACTOR_EXPORT_MAX_SHARD_SIZE:-2GB}"
 ACTOR_EXPORT_ROLLOUT_GPU_MEMORY_UTILIZATION="${ACTOR_EXPORT_ROLLOUT_GPU_MEMORY_UTILIZATION:-0.15}"
 RUNTIME_DIR="${ACTOR_EXPORT_RUNTIME_DIR:-$PROJECT_ROOT/outputs/actor_export_runtime}"
+DATA_WRITING_DIR="${ACTOR_EXPORT_DATA_WRITING_DIR:-$RUNTIME_DIR/data_writing}"
 
 if [[ ! -d "$CHECKPOINT_PATH" || "$(basename "$CHECKPOINT_PATH")" != global_step_* ]]; then
   echo "ERROR: CHECKPOINT_PATH must be an existing global_step_* directory." >&2
@@ -43,13 +44,14 @@ if ! [[ "$EXPORT_STEP" =~ ^[0-9]+$ ]]; then
   exit 2
 fi
 
-mkdir -p "$RUNTIME_DIR"
+mkdir -p "$RUNTIME_DIR" "$DATA_WRITING_DIR"
 echo "[Actor export] source=$CHECKPOINT_PATH"
 echo "[Actor export] destination=$ACTOR_EXPORT_DIR shards=$ACTOR_EXPORT_MAX_SHARD_SIZE gpus=$N_GPUS"
 
 python -u -m verl.trainer.main_ppo \
   "data.train_files=$TRAIN_FILE" \
   "data.val_files=$TRAIN_FILE" \
+  "+data.data_writing_path=$DATA_WRITING_DIR" \
   "data.train_batch_size=128" \
   "data.val_batch_size=256" \
   "data.max_prompt_length=4096" \
