@@ -141,9 +141,12 @@ python -m pip install 'ninja==1.13.0'
 command -v ninja >/dev/null 2>&1 || fail "Ninja was installed but is not on PATH."
 
 echo "Building FlashAttention from source..."
-# Torch may have been repaired above.  Rebuild instead of reusing an extension
-# that was compiled against a previous (possibly incompatible) Torch ABI.
-python -m pip install --force-reinstall --verbose --no-cache-dir --no-build-isolation 'flash-attn==2.5.8'
+# Torch has been repaired above.  FlashAttention's package metadata leaves its
+# ``torch`` dependency unpinned; combined with ``--force-reinstall``, pip
+# would otherwise reinstall the newest PyPI Torch and silently replace the
+# locked 2.4.0+cu121 runtime.  Build only the extension against the already
+# installed locked Torch ABI.
+python -m pip install --force-reinstall --no-deps --verbose --no-cache-dir --no-build-isolation 'flash-attn==2.5.8'
 python - <<'PY'
 from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input
 
