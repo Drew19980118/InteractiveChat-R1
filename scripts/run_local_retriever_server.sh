@@ -10,6 +10,15 @@ cd "$PROJECT_ROOT"
 : "${RETRIEVER_CORPUS_PATH:?Set the JSONL corpus path aligned to the FAISS ids.}"
 
 INTERACTIVECHAT_CONDA_ENV="${INTERACTIVECHAT_CONDA_ENV:-interactivechat-r1}"
+RETRIEVER_FAISS_GPU="${RETRIEVER_FAISS_GPU:-true}"
+case "$RETRIEVER_FAISS_GPU" in
+  true) FAISS_GPU_ARGUMENT="--faiss_gpu" ;;
+  false) FAISS_GPU_ARGUMENT="--no-faiss_gpu" ;;
+  *)
+    echo "ERROR: RETRIEVER_FAISS_GPU must be true or false." >&2
+    exit 2
+    ;;
+esac
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$INTERACTIVECHAT_CONDA_ENV"
 
@@ -22,4 +31,4 @@ exec python -u scripts/local_retriever.py \
   --max_length "${RETRIEVER_MAX_LENGTH:-256}" \
   --host "${RETRIEVER_HOST:-127.0.0.1}" \
   --port "${RETRIEVER_PORT:-8002}" \
-  --faiss_gpu
+  "$FAISS_GPU_ARGUMENT"
