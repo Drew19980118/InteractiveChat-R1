@@ -74,6 +74,7 @@ InteractiveChat-R1/
 │   ├── run_inscit_3b_ablation_suite.sh
 │   ├── run_inscit_3b_static_baselines_then_wo_clarity_suite.sh
 │   ├── run_inscit_7b_static_baselines_suite.sh
+│   ├── run_qrecc_3b_then_7b_static_baselines_export_upload_suite.sh
 │   ├── prepare_static_convagent_monitor_split.py
 │   ├── run_static_convagent_{inscit,qrecc}_suite.sh
 │   ├── run_static_convagent_train.sh / run_static_convagent_eval.sh
@@ -913,6 +914,66 @@ Replace `InteractiveChat-R1` by the actual Hugging Face organization or
 `DrewZhang` if you, rather than a collaborator, own the destination namespace.
 To export locally without an upload, set only `EXPORT_ACTOR_ONLY=true`; the
 two actor directories are then placed under `exports/`.
+
+### Serial QReCC 3B and 7B static-baseline comparison
+
+For QReCC, keep the local retriever on the **QReCC** collection while running
+the source training and source-test validations.  The 210-GB flat index is
+sharded over the two visible GPUs by the retriever launcher.
+
+```bash
+mkdir -p logs
+
+nohup env \
+  CUDA_VISIBLE_DEVICES=0,1 \
+  RETRIEVER_FAISS_GPU=true \
+  RETRIEVER_INDEX_PATH=$PWD/collection/qrecc/e5_Flat.index \
+  RETRIEVER_CORPUS_PATH=$PWD/collection/qrecc/qrecc_index.jsonl \
+  RETRIEVER_MODEL_PATH=intfloat/e5-base-v2 \
+  INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
+  bash scripts/run_local_retriever_server.sh \
+  > logs/qrecc_retriever.log 2>&1 &
+
+until curl -fsS http://127.0.0.1:8002/health; do sleep 5; done
+```
+
+The following single launcher runs, in order: ConvAgent 3B -> QReCC test ->
+actor export/upload; ChatR1 3B -> QReCC test -> actor export/upload; then the
+same two stages with 7B.  It uses the existing static baseline settings for
+every run: train batch `128`, PPO mini-batch `64`, GRPO group size `8`,
+validation batch `256`, monitor every five steps, plateau-based checkpoint
+selection, and a single selected full checkpoint.  No user simulator is used.
+
+Create the four destination model repositories in the target Hugging Face
+namespace before starting, and authenticate once with `hf auth login`.
+
+```bash
+mkdir -p logs
+
+nohup env \
+  CUDA_VISIBLE_DEVICES=0,1 \
+  N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
+  MODEL_3B_PATH=$PWD/models/Qwen2.5-3B-Instruct \
+  MODEL_7B_PATH=$PWD/models/Qwen2.5-7B-Instruct \
+  EXPORT_ACTOR_ONLY=true \
+  HF_UPLOAD_ACTOR_ONLY=true \
+  HF_CONVAGENT_3B_REPO_ID=DrewZhang/interactivechat-r1-static-convagent-qrecc-qwen25-3b \
+  HF_CHATR1_3B_REPO_ID=DrewZhang/interactivechat-r1-static-chatr1-qrecc-qwen25-3b \
+  HF_CONVAGENT_7B_REPO_ID=DrewZhang/interactivechat-r1-static-convagent-qrecc-qwen25-7b \
+  HF_CHATR1_7B_REPO_ID=DrewZhang/interactivechat-r1-static-chatr1-qrecc-qwen25-7b \
+  HF_UPLOAD_NUM_WORKERS=8 \
+  INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
+  bash scripts/run_qrecc_3b_then_7b_static_baselines_export_upload_suite.sh \
+  > logs/qrecc_3b_then_7b_static_baselines_export_upload.log 2>&1 &
+
+tail -f logs/qrecc_3b_then_7b_static_baselines_export_upload.log
+```
+
+Its four source-test summaries are written under
+`eval_log/static_{convagent,chatr1}/static_{convagent,chatr1}_qrecc_qwen25_{3b,7b}_to_qrecc/metrics_summary.json`.
+For QReCC -> CoRAL transfer, wait for this suite to finish, stop the QReCC
+retriever, restart it with `collection/coral`, and run the existing explicit
+CoRAL validation launchers against each selected checkpoint.
 
 ### Resume an interrupted run
 
