@@ -42,12 +42,37 @@ models/Qwen2.5-7B-Instruct/
 models/Qwen2.5-32B-Instruct/
 data/static_convagent_raw/ConvAgent/
 data/static_chatr1_raw/ChatR1/
+data/raw/inscit_train.json
+data/raw/inscit_test.json
 data/sim_user_inscit_train.parquet
 data/sim_user_inscit_test.parquet
 collection/{inscit,qrecc}/
 ~~~
 
-Download the released static Parquets:
+## Download model, passage, and dynamic-data assets
+
+### Qwen policy and simulator models
+
+All paths supplied to the launchers must be **local Hugging Face model directories** (they must contain `config.json`). Download the public models once per server:
+
+~~~bash
+mkdir -p models
+hf download Qwen/Qwen2.5-3B-Instruct \
+  --local-dir models/Qwen2.5-3B-Instruct
+hf download Qwen/Qwen2.5-7B-Instruct \
+  --local-dir models/Qwen2.5-7B-Instruct
+hf download Qwen/Qwen2.5-32B-Instruct \
+  --local-dir models/Qwen2.5-32B-Instruct
+~~~
+
+The 3B and 7B models initialize the corresponding policy (and, where used,
+the separately initialized critic). The 32B model is required only for the
+frozen TurnPPO user simulator. Before a private-model download or an upload,
+authenticate with `hf auth login`; verify the active account with `hf whoami`.
+
+### Static ConvAgent and ChatR1 Parquets
+
+Download the released static data before running either baseline:
 
 ~~~bash
 hf download DrewZhang/conv --repo-type dataset \
@@ -55,6 +80,106 @@ hf download DrewZhang/conv --repo-type dataset \
 hf download DrewZhang/conv --repo-type dataset \
   --include "ChatR1/**" --local-dir data/static_chatr1_raw
 ~~~
+
+### Passage corpora and E5 FAISS indexes
+
+The local retriever requires a **dataset-matched pair**: one merged
+`e5_Flat.index` and one row-aligned JSONL corpus. Do not mix an InsCiT index
+with QReCC data (or the reverse). Keep the source shards after merging: they
+make interrupted downloads resumable and allow the merged index to be rebuilt.
+
+InsCiT uses `DrewZhang/inscit-passages-index` (14 FAISS shards and 5 Parquet
+shards). Reserve roughly 350 GB free for the shards, JSONL corpus, and merged
+index:
+
+~~~bash
+hf download DrewZhang/inscit-passages-index --repo-type dataset \
+  --local-dir collection/inscit --max-workers 4
+
+python scripts/build_inscit_corpus.py \
+  --collection-dir collection/inscit
+
+cat collection/inscit/e5_Flat.index.part_* \
+  > collection/inscit/e5_Flat.index
+
+test -f collection/inscit/inscit_index.jsonl
+test -f collection/inscit/e5_Flat.index
+~~~
+
+QReCC uses `DrewZhang/qrecc-passages-index`. Its downloader is resumable and
+intentionally uses a separate Conda environment so it cannot modify the
+training environment. It enforces a 500-GB free-space check:
+
+~~~bash
+QRECC_DOWNLOAD_ENV=hf-download HF_MAX_WORKERS=8 \
+  bash scripts/download_qrecc_index.sh
+
+python scripts/build_qrecc_corpus.py \
+  --collection-dir collection/qrecc
+
+cat collection/qrecc/e5_Flat.index.part_* \
+  > collection/qrecc/e5_Flat.index
+
+test -f collection/qrecc/qrecc_index.jsonl
+test -f collection/qrecc/e5_Flat.index
+~~~
+
+Use GPUs 0 and 1 for retrieval and GPUs 2 and 3 for policy training. This is
+the resource layout used by the static ConvAgent/ChatR1 suites (the simulator
+is not running for those static baselines):
+
+~~~bash
+CUDA_VISIBLE_DEVICES=0,1 \
+RETRIEVER_FAISS_GPU=true \
+RETRIEVER_INDEX_PATH=$PWD/collection/qrecc/e5_Flat.index \
+RETRIEVER_CORPUS_PATH=$PWD/collection/qrecc/qrecc_index.jsonl \
+RETRIEVER_MODEL_PATH=intfloat/e5-base-v2 \
+INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
+bash scripts/run_local_retriever_server.sh > logs/qrecc_retriever.log 2>&1 &
+~~~
+
+For InsCiT, use the same command but replace both `qrecc` paths with `inscit`.
+With GPU FAISS enabled, expose at least two retrieval GPUs; the server shards
+the index over the visible GPUs. If the cards cannot accommodate the index,
+set `RETRIEVER_FAISS_GPU=false` and expect lower throughput.
+
+For **TurnPPO**, the Qwen-32B simulator also uses GPUs 0 and 1, while training
+stays on GPUs 2 and 3. Do not run GPU-FAISS retrieval and the 32B simulator on
+GPUs 0 and 1 at the same time: their memory footprints are additive. If only
+these four GPUs are available, start the retriever with
+`RETRIEVER_FAISS_GPU=false` (the query encoder still uses the visible GPUs)
+or reserve another GPU pair for GPU-FAISS retrieval.
+
+### Dynamic dialogue Parquets (required by TurnPPO only)
+
+**Yes—this conversion belongs in the setup instructions.** ConvAgent and
+ChatR1 consume the static Parquets directly and never need this step. TurnPPO
+instead replays complete dialogues against the user simulator, so it needs
+one-dialogue-per-row dynamic Parquets. The conversion keeps the complete raw
+conversation, canonical source labels, and an audit file; it does not call a
+model or retrieve passages.
+
+For the released InsCiT TurnPPO workflow, place the original full-dialogue
+JSON files at `data/raw/inscit_train.json` and `data/raw/inscit_test.json`,
+then run:
+
+~~~bash
+python scripts/prepare_simulated_user_inscit.py \
+  --input data/raw/inscit_train.json \
+  --output data/sim_user_inscit_train.parquet \
+  --split train
+
+python scripts/prepare_simulated_user_inscit.py \
+  --input data/raw/inscit_test.json \
+  --output data/sim_user_inscit_test.parquet \
+  --split test
+~~~
+
+The TurnPPO launcher then deterministically creates its own dialogue-disjoint
+10% train/monitor split (seed 42, first source user question), matching the
+baseline monitor split. If dynamic Parquets already exist, do not reconvert
+them unless the original raw dialogues changed.
+
 
 Start the dataset-matched retriever before a run. InsCiT example:
 
@@ -121,10 +246,10 @@ DATASET=inscit bash scripts/run_latest_static_baselines_suite.sh
 
 ## TurnPPO InsCiT 3B
 
-Start the 32B simulator on GPUs distinct from the training pair:
+Start the 32B simulator on GPUs 0 and 1; training remains on GPUs 2 and 3:
 
 ~~~bash
-CUDA_VISIBLE_DEVICES=4,5 \
+CUDA_VISIBLE_DEVICES=0,1 \
 SIMULATOR_MODEL_PATH=$PWD/models/Qwen2.5-32B-Instruct \
 SIMULATOR_MODEL_NAME=qwen32b-user-simulator \
 SIMULATOR_PORT=8010 SIMULATOR_TP_SIZE=2 \
