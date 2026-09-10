@@ -61,9 +61,7 @@ def extract_terminal_action(
 ) -> tuple[str, bool]:
     """Parse the final assistant action without scoring its answer text.
 
-    ``answer`` and empty ``nonanswer`` are normally the only valid terminal
-    actions. Static ConvAgent evaluation additionally permits a non-empty
-    ``clarify`` terminal action.
+    ``answer`` and empty ``nonanswer`` are the only valid terminal actions.
     The parser intentionally examines only the final assistant turn, so prior
     tool calls cannot be mistaken for a terminal prediction.
     """
@@ -155,9 +153,6 @@ def compute_f1(
         allow_search=static_convagent_mode or static_chatr1_mode,
     )
     if not format_valid:
-        # ChatR1's published objective supplies answer F1 and intent F1 only;
-        # malformed output therefore receives zero task reward rather than an
-        # additional hidden format penalty.
         return 0.0 if (val_type == 'noformatf1' or static_chatr1_mode) else -2.0
 
     # A syntactically valid nonanswer action is not a formatting failure. It

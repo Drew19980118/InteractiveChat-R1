@@ -680,25 +680,32 @@ class ActorRolloutRefWorker(Worker):
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):
+    def load_checkpoint(
+        self,
+        local_path,
+        hdfs_path=None,
+        del_local_after_load=False,
+        model_only: bool = False,
+    ):
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
-        self.checkpoint_manager.load_checkpoint(local_path=local_path, hdfs_path=hdfs_path, del_local_after_load=del_local_after_load)
+        self.checkpoint_manager.load_checkpoint(
+            local_path=local_path,
+            hdfs_path=hdfs_path,
+            del_local_after_load=del_local_after_load,
+            model_only=model_only,
+        )
 
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
 
+        if self._is_offload_optimizer:
+            offload_fsdp_optimizer(self.actor_optimizer)
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def export_actor_hf(self, export_path: str, max_shard_size: str = "2GB"):
-        """Materialize the loaded FSDP actor as an inference-only HF checkpoint.
-
-        PPO checkpoints keep one sharded model state, optimizer state, and RNG
-        state per rank.  Evaluation-only users need only the actor weights.
-        This method must therefore run *after* ``load_checkpoint`` while the
-        original FSDP world size is available; loading one shard directly would
-        silently produce an incomplete model.
-        """
+        """Export the loaded FSDP actor as a standalone Hugging Face model."""
         assert self._is_actor, "Only the actor worker can export an actor policy"
 
         from torch.distributed.fsdp import (
@@ -717,8 +724,6 @@ class ActorRolloutRefWorker(Worker):
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
-        # Rank zero receives a CPU-offloaded, unsharded state dict.  The other
-        # ranks participate in the collective but do not retain a duplicate.
         full_state_config = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
         with FSDP.state_dict_type(
             self.actor_module_fsdp,
@@ -743,7 +748,6 @@ class ActorRolloutRefWorker(Worker):
 
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(self.actor_optimizer)
 

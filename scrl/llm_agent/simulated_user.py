@@ -36,8 +36,19 @@ def response_type_to_action(response_type: Any) -> Optional[str]:
     return _ACTION_TYPES.get(normalize_text(response_type).replace(" ", ""))
 
 
+def _gold_response(value: Any) -> str:
+    """Preserve the source's fixed answer-reference set for one subtask.
+
+    The policy still produces one answer.  A legacy source may serialize
+    several accepted references with ``<|answer_split|>``; the rollout and
+    final evaluator score that one prediction by its maximum F1/BERTScore over
+    this fixed set.
+    """
+    return str(value or "").strip()
+
+
 def _label_response(label: Mapping[str, Any]) -> str:
-    return str(label.get("response", label.get("ground_truth", "")) or "").strip()
+    return _gold_response(label.get("response", label.get("ground_truth", "")))
 
 
 def _label_passage_ids(label: Mapping[str, Any]) -> list[str]:
@@ -188,7 +199,7 @@ def parse_dialogue_payload(payload: Any, *, fallback_id: str = "") -> dict[str, 
                 {
                     "question": str(value.get("question", "")).strip(),
                     "expected_action": action,
-                    "gold_response": str(value.get("gold_response", "")).strip(),
+                    "gold_response": _gold_response(value.get("gold_response", "")),
                     "ground_truth_passage_ids": [str(x) for x in value.get("ground_truth_passage_ids", []) or []],
                     "ground_truth_passage_texts": [
                         str(item) for item in value.get("ground_truth_passage_texts", []) or []

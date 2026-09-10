@@ -24,11 +24,12 @@ from scrl.llm_agent.simulated_user import (
     UserSimulatorClient,
     build_simulated_user_system_prompt,
     keep_first_complete_action,
-    normalize_text,
     parse_agent_action,
     parse_dialogue_payload,
 )
 from verl import DataProto
+from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
+from verl.utils.reward_score.static_convagent import token_set_f1_max_reference
 from verl.utils.torch_functional import get_response_mask, pad_2d_list_to_length
 
 
@@ -37,38 +38,30 @@ _COMPONENTS = (
     "answer_f1",
     "evidence_utility",
     "search_efficiency",
+    "uci",
     "clarity",
     "patience",
     "format",
     "clarify_f1",
 )
 
-# ``full`` is the proposed method: answer-reference F1 supplies the answer
-# correctness signal, while the user simulator supplies clarity and patience
-# signals. ``uci_replaced_by_answer_f1`` is retained as a legacy alias for
-# earlier configurations; it has exactly the same reward semantics as full.
+# These two modes keep the task-control and user-satisfaction channels used by
+# the proposed method.  ``uci_replaced_by_answer_f1`` changes exactly one
+# answer-quality channel, rather than accidentally turning the comparison into
+# a broad "F1 only" reward ablation.  ``turn_ppo`` deliberately does not use
+# these channels: feedback changes the next observation, never the reward.
 _FULL_AUXILIARY_CHANNEL_MODES = frozenset({"full", "uci_replaced_by_answer_f1"})
 
 
 def _token_f1(prediction: str, reference: str) -> float:
-    """Small, deterministic lexical F1 used only for clarification reward."""
-    pred = normalize_text(prediction).split()
-    gold = normalize_text(reference).split()
-    if not pred or not gold:
-        return 0.0
-    common: dict[str, int] = {}
-    for token in pred:
-        common[token] = common.get(token, 0) + 1
-    overlap = 0
-    for token in gold:
-        if common.get(token, 0) > 0:
-            overlap += 1
-            common[token] -= 1
-    if not overlap:
-        return 0.0
-    precision = overlap / len(pred)
-    recall = overlap / len(gold)
-    return 2.0 * precision * recall / (precision + recall)
+    """Turn-PPO answer F1 for one prediction against all released references.
+
+    The actor generates exactly one terminal answer.  If a source serializes
+    equivalent released answers with ``<|answer_split|>``, the reward is the
+    maximum token-set F1 over that fixed reference set.  The same definition
+    is used by the dynamic monitor and final report.
+    """
+    return token_set_f1_max_reference(prediction, reference)
 
 
 @dataclass
@@ -77,27 +70,44 @@ class SimulatedUserSettings:
 
     allow_clarify: bool = True
     allow_nonanswer: bool = True
-    # ``full`` uses terminal answer-vs-gold token F1 as its answer-correctness
-    # channel and retains action, clarity, patience, format, and clarify-F1.
-    # ``uci_replaced_by_answer_f1`` is a backwards-compatible alias.  In
-    # contrast, ``answer_f1_only`` is the intentionally much stronger
-    # baseline which sends no auxiliary reward channels to GRPO.
+    # ``full`` uses UCI as the answer-quality channel.
+    # ``uci_replaced_by_answer_f1`` is the controlled UCI ablation: it keeps
+    # all other proposed-method channels but substitutes terminal answer F1
+    # for UCI.  ``answer_f1_only`` is the intentionally much stronger
+    # F1-only baseline, which sends no auxiliary reward channels to GRPO.
     reward_mode: str = "full"
-    # These legacy shaping channels are intentionally off in the canonical
-    # method. Keep their switches only for archived experimental configs.
-    enable_evidence_utility: bool = False
-    enable_search_efficiency: bool = False
-    # When disabled, a correct answer advances immediately: no user feedback,
-    # no clarity/patience reward, and no answer retry.  It does *not* imply
-    # static gold context: later source sub-tasks still condition on the
-    # policy's public answer (or an environmental gold fallback).
+    # Turn-PPO uses one policy action as one macro step.  Its only train-time
+    # reward is the immediate terminal-action score below.  The frozen user
+    # simulator still supplies level-1/2/3 feedback as the next observation,
+    # but its judgement has no reward component.
+    turn_ppo: bool = False
+    # Correct answer/clarify actions receive their semantic F1 rather than a
+    # fixed positive bonus. A fixed +1 made arbitrary legal <answer> strings
+    # profitable and caused retry-driven policy collapse. Wrong actions stay
+    # negative; a correct nonanswer needs a small explicit reward because it
+    # deliberately has no text label to score.
+    turn_ppo_action_correct_reward: float = 0.0
+    turn_ppo_action_incorrect_reward: float = -1.0
+    turn_ppo_nonanswer_correct_reward: float = 0.2
+    turn_ppo_format_valid_reward: float = 0.0
+    turn_ppo_format_invalid_reward: float = -1.0
+    turn_ppo_answer_f1_weight: float = 1.0
+    turn_ppo_clarify_f1_weight: float = 1.0
+    # The original UCI method does not use the answer-stripped evidence-only
+    # channel or a repeated-search penalty.  Keep these independently
+    # switchable so an ablation can remove the channels rather than merely
+    # giving their normalized advantages a zero weight.
+    enable_evidence_utility: bool = True
+    enable_search_efficiency: bool = True
+    # When disabled, a correct answer advances immediately: no feedback text,
+    # no clarity/patience reward, and no answer retry. The static-context
+    # ablation additionally resets each sub-task to its source gold dialogue
+    # prefix.
     enable_user_feedback: bool = True
-    # Evaluation-only user-satisfaction probe.  It asks the frozen simulator
-    # for one level-1/2/3 judgement but never exposes that feedback to the
-    # policy and never creates a reward channel or retry.  This supports the
-    # ``w/o user feedback`` ablation without turning it into a gold-prefix
-    # control.
-    assess_user_satisfaction: bool = False
+    # Validation-only passive assessment. It asks the simulator for a level
+    # after the final visible answer, but never inserts feedback, retries, or
+    # simulator-derived reward into the policy trajectory.
+    passive_satisfaction_evaluation: bool = False
     use_static_gold_context: bool = False
     max_tool_calls: int = 4
     max_search_queries: int = 1
@@ -113,7 +123,7 @@ class SimulatedUserSettings:
     simulator_model: Optional[str] = None
     simulator_timeout_seconds: int = 120
     # Caps apply only to the frozen user-simulator evaluation request. They do
-    # not truncate policy trajectories or the actor update.
+    # not truncate policy trajectories, UCI inputs, or the actor update.
     simulator_question_token_cap: int = 384
     simulator_gold_response_token_cap: int = 768
     simulator_answer_token_cap: int = 768
@@ -158,6 +168,11 @@ class _Event:
     # The first retrieval is free; each additional retrieval receives one unit
     # of penalty before same-depth sibling normalization.
     search_efficiency: Optional[float] = None
+    uci: Optional[float] = None
+    # Set only for an answer/clarify/nonanswer or malformed terminal action in
+    # the Turn-PPO variant.  Tool actions have no immediate reward; their
+    # credit arrives through turn-level bootstrapping from the next action.
+    turn_ppo_reward: Optional[float] = None
     expected_action: str = ""
     # Exact live policy context immediately before this assistant action.  It
     # allows evidence to be compacted later without changing the log-prob
@@ -207,8 +222,9 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
 
     There are two intentionally separate phases at every policy answer:
 
-    1. The terminal answer receives direct answer-vs-gold F1, while the
-       action, format, clarity, and patience channels remain separate.
+    1. The pre-update actor scores UCI under ``torch.no_grad``.  The actor is
+       not updated until all rollout scoring has completed, so this is the
+       required frozen old-policy score without keeping a second model copy.
     2. The external Qwen32B simulator returns only a clarity level and short
        feedback.  It never becomes a policy assistant message.
     """
@@ -220,11 +236,17 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
             "full",
             "uci_replaced_by_answer_f1",
             "answer_f1_only",
+            "turn_ppo",
         }:
             raise ValueError(
                 "simulated_user_reward_mode must be 'full', "
-                "'uci_replaced_by_answer_f1', or 'answer_f1_only', "
+                "'uci_replaced_by_answer_f1', 'answer_f1_only', or 'turn_ppo', "
                 f"got {settings.reward_mode!r}"
+            )
+        if settings.turn_ppo != (settings.reward_mode == "turn_ppo"):
+            raise ValueError(
+                "simulated_user_turn_ppo and simulated_user_reward_mode must agree: "
+                "use turn_ppo=true with reward_mode='turn_ppo'"
             )
         if settings.max_tool_calls < 1:
             raise ValueError("simulated_user_max_tool_calls must be >= 1")
@@ -245,7 +267,7 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
             if int(getattr(settings, name)) < 1:
                 raise ValueError(f"{name} must be >= 1")
         self.simulator: Optional[UserSimulatorClient] = None
-        if settings.enable_user_feedback or settings.assess_user_satisfaction:
+        if settings.enable_user_feedback or settings.passive_satisfaction_evaluation:
             self.simulator = UserSimulatorClient(
                 base_url=settings.simulator_base_url,
                 model=settings.simulator_model,
@@ -575,6 +597,83 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
         )
         return active
 
+    def _score_uci_batch(
+        self,
+        requests: list[tuple[_State, list[dict[str, Any]], str]],
+    ) -> tuple[list[float], list[float]]:
+        """Return UCI and answer-stripped evidence utility for each request.
+
+        ``uci`` is ``logP(gold|history+answer)-logP(gold|history)``.  The
+        accompanying evidence utility is the latter absolute score only:
+        after removing the *whole* terminal assistant response, it measures
+        how likely the old policy finds the gold under the preceding dialogue,
+        private queries, and retrieved passages.  It is independently
+        normalized among same-dialogue/same-subtask/same-depth siblings, so
+        an absolute log-prob becomes a relative positive/negative reward.
+
+        Both score states receive the same invisible evaluator prompt.  The
+        prompt is never appended to a policy rollout; this is a no-gradient
+        old-policy probe after generation and before the actor update.
+        """
+        if not requests:
+            return [], []
+        prompt_messages: list[list[dict[str, Any]]] = []
+        targets: list[list[int]] = []
+        lookup: list[tuple[int, bool]] = []
+        probe = (
+            "Internal evaluator request: give the canonical answer to the current user question "
+            "in one concise response."
+        )
+        for request_index, (_state, before, gold) in enumerate(requests):
+            if not gold.strip():
+                lookup.extend(((request_index, False), (request_index, True)))
+                prompt_messages.extend((before, before))
+                targets.extend(([], []))
+                continue
+            after = [dict(message) for message in before]
+            # ``before`` passed in already includes the generated assistant answer.
+            # Its companion history removes that final policy assistant message.
+            history = [dict(message) for message in before[:-1]]
+            for include_answer, messages in ((False, history), (True, after)):
+                scored_messages = [dict(message) for message in messages]
+                scored_messages.append({"role": "user", "content": probe})
+                prompt_messages.append(scored_messages)
+                target = self.tokenizer(
+                    gold + "\n<|im_end|>", add_special_tokens=False
+                )["input_ids"]
+                targets.append(target)
+                lookup.append((request_index, include_answer))
+
+        nonempty = [index for index, target in enumerate(targets) if target]
+        scores = [0.0] * len(targets)
+        if nonempty:
+            prompts = self._build_rollings_from_messages(
+                [prompt_messages[index] for index in nonempty],
+                self._prompt_token_budget(max(len(targets[index]) for index in nonempty)),
+            )
+            pseudo = self.pseudo_generate_sequences(
+                prompts,
+                [targets[index] for index in nonempty],
+            )
+            padded, pad_size = pad_dataproto_to_divisor(pseudo, self.actor_rollout_wg.world_size)
+            log_probs = self.actor_rollout_wg.compute_log_prob(padded)
+            log_probs = unpad_dataproto(log_probs, pad_size=pad_size)
+            for local_index, global_index in enumerate(nonempty):
+                token_count = len(targets[global_index])
+                values = log_probs.batch["old_log_probs"][local_index, :token_count]
+                mean = float(values.mean().item()) if token_count else 0.0
+                scores[global_index] = mean if math.isfinite(mean) else 0.0
+
+        per_request: list[dict[bool, float]] = [dict() for _ in requests]
+        for score, (request_index, include_answer) in zip(scores, lookup):
+            per_request[request_index][include_answer] = score
+        evidence_utilities = [parts.get(False, 0.0) for parts in per_request]
+        uci_values = [
+            parts.get(True, 0.0) - parts.get(False, 0.0)
+            for parts in per_request
+        ]
+        return uci_values, evidence_utilities
+
     @staticmethod
     def _append_public_assistant_message(state: _State, content: Any) -> None:
         """Add one user-visible assistant utterance to the simulator view."""
@@ -692,6 +791,55 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
         state.events.append(event)
         return event
 
+    def _assign_turn_ppo_terminal_reward(
+        self,
+        *,
+        state: _State,
+        event: _Event,
+        action: AgentAction,
+    ) -> None:
+        """Attach the one immediate macro-step reward for Turn-PPO.
+
+        The value is intentionally written only for terminal/malformed policy
+        actions.  Search/tool actions receive zero immediate reward and are
+        credited by GAE through the value of the following observation.  User
+        satisfaction and patience are deliberately absent: the simulator can
+        add feedback to the next policy context, but cannot alter this reward.
+        """
+        if not self.settings.turn_ppo:
+            return
+
+        expected = state.subtask["expected_action"]
+        action_correct = bool(event.format_valid and action.kind == expected)
+        action_reward = (
+            self.settings.turn_ppo_action_correct_reward
+            if action_correct
+            else self.settings.turn_ppo_action_incorrect_reward
+        )
+        if action_correct and action.kind == "nonanswer":
+            action_reward += self.settings.turn_ppo_nonanswer_correct_reward
+        format_reward = (
+            self.settings.turn_ppo_format_valid_reward
+            if event.format_valid
+            else self.settings.turn_ppo_format_invalid_reward
+        )
+        text_reward = 0.0
+        if action_correct and action.kind == "answer":
+            event.answer_f1 = _token_f1(action.content, state.subtask["gold_response"])
+            text_reward = self.settings.turn_ppo_answer_f1_weight * event.answer_f1
+        elif action_correct and action.kind == "clarify":
+            clarify_f1 = _token_f1(action.content, state.subtask["gold_response"])
+            text_reward = self.settings.turn_ppo_clarify_f1_weight * clarify_f1
+            # Retain the component in the trace under the established name so
+            # answer and clarification quality can be audited separately.
+            event.components["clarify_f1"] = clarify_f1
+
+        event.components["turn_ppo_action"] = float(action_reward)
+        event.components["turn_ppo_format"] = float(format_reward)
+        event.components["turn_ppo_text_f1"] = float(text_reward)
+        event.turn_ppo_reward = float(action_reward + format_reward + text_reward)
+        event.components["turn_ppo_terminal"] = event.turn_ppo_reward
+
     @staticmethod
     def _success_scale(depth: int) -> float:
         return {1: 1.0, 2: 0.5, 3: 0.25}.get(depth, 0.0)
@@ -738,6 +886,7 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
         raw_response: str,
         original_raw_response: str,
         trailing_content_discarded: bool,
+        pending_uci: list[tuple[_Event, _State, list[dict[str, Any]], str]],
         pending_judgements: list[tuple[_State, _Event, str]],
     ) -> None:
         expected = state.subtask["expected_action"]
@@ -748,8 +897,9 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
             original_raw_response=original_raw_response,
             trailing_content_discarded=trailing_content_discarded,
         )
+        self._assign_turn_ppo_terminal_reward(state=state, event=event, action=action)
         # Action reward is collected only at the initial terminal decision.
-        # The full F1+satisfaction objective keeps this channel; the F1-only
+        # The controlled UCI→F1 ablation keeps this channel; the F1-only
         # baseline deliberately omits it together with all other auxiliaries.
         if (
             self.settings.reward_mode in _FULL_AUXILIARY_CHANNEL_MODES
@@ -773,6 +923,12 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
             self._move_to_next_subtask(state)
             return
 
+        if self.settings.reward_mode == "turn_ppo":
+            # The simulator provides the next public observation/retry state,
+            # never a dedicated satisfaction or patience reward.
+            pending_judgements.append((state, event, action.content))
+            return
+
         if self.settings.reward_mode == "answer_f1_only":
             # Preserve retrieval, simulator feedback/retries, and fallback
             # mechanics, while supplying only direct answer-vs-gold F1 to
@@ -782,26 +938,43 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
             pending_judgements.append((state, event, action.content))
             return
 
-        if self.settings.reward_mode in _FULL_AUXILIARY_CHANNEL_MODES:
-            # Full objective: answer-reference F1 measures answer correctness;
-            # simulator-derived clarity and patience measure user satisfaction.
-            # No frozen-model likelihood, evidence-utility, or
-            # search-efficiency reward is scheduled in this method.
+        if self.settings.reward_mode == "uci_replaced_by_answer_f1":
+            # Controlled ablation: all task-control, formatting and simulator
+            # satisfaction channels remain active, but direct answer-vs-gold
+            # F1 replaces the UCI channel.  No frozen-model UCI forward is
+            # scheduled in this branch.
             event.answer_f1 = _token_f1(action.content, state.subtask["gold_response"])
             event.components["answer_f1"] = event.answer_f1
+            if self.settings.enable_search_efficiency:
+                event.search_efficiency = self._search_efficiency_reward(state.tool_calls)
+                event.components["search_efficiency"] = event.search_efficiency
             pending_judgements.append((state, event, action.content))
             return
 
-    def _judge_answer(self, state: _State, event: _Event, answer: str) -> Any:
-        """Attach one privacy-bounded simulator judgement to ``event``.
+        # The first retrieval is normally necessary, so charge only the second
+        # and later calls.  Placing this on the terminal answer lets sparse
+        # reward-to-go teach all earlier query actions without extra scoring
+        # forwards per tool call.
+        if self.settings.enable_search_efficiency:
+            event.search_efficiency = self._search_efficiency_reward(state.tool_calls)
+            event.components["search_efficiency"] = event.search_efficiency
+        # Correct answer: score UCI before any user-simulator feedback is appended.
+        pending_uci.append((event, state, [dict(message) for message in state.messages], state.subtask["gold_response"]))
 
-        The caller decides whether the judgement is interactive (feedback and
-        retry) or evaluation-only.  In both cases the simulator sees the same
-        public projection *before* the candidate answer is appended, never the
-        policy's private reasoning/tool trace.
-        """
+    def _handle_judgement(self, state: _State, event: _Event, answer: str) -> None:
+        feedback_enabled = self.settings.enable_user_feedback
+        passive_evaluation = self.settings.passive_satisfaction_evaluation
+        if not feedback_enabled and not passive_evaluation:
+            # No-feedback training: an answer gets exactly one user-visible
+            # attempt, then the environment advances without a simulator call.
+            self._append_public_assistant_message(state, answer)
+            self._move_to_next_subtask(state)
+            return
         if self.simulator is None:
-            raise RuntimeError("simulated-user judgement was requested but no simulator client was created")
+            raise RuntimeError(
+                "simulated-user feedback/passive satisfaction evaluation is enabled "
+                "but no simulator client was created"
+            )
         subtask = state.subtask
         public_transcript = self._public_transcript(state)
         judgement = self.simulator.judge_answer(
@@ -819,27 +992,17 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
         event.simulator_feedback = judgement.feedback
         event.simulator_status = judgement.source
         event.simulator_public_transcript = public_transcript
-        return judgement
-
-    def _handle_judgement(self, state: _State, event: _Event, answer: str) -> None:
-        if not self.settings.enable_user_feedback:
-            # ``w/o user feedback`` remains an online dynamic-context
-            # environment: the next sub-task sees this sampled public answer
-            # (or a later fallback), not the source-data gold prefix.  During
-            # validation we may still run one hidden satisfaction assessment
-            # for reporting, but it is never appended as feedback and never
-            # contributes a reward or retry.
-            if self.settings.assess_user_satisfaction:
-                self._judge_answer(state, event, answer)
-            self._append_public_assistant_message(state, answer)
-            self._move_to_next_subtask(state)
-            return
-
-        judgement = self._judge_answer(state, event, answer)
         # The user has now seen this answer.  Future clarity judgements and
         # retry turns retain only this public answer, never its think/tool
         # trace or retrieved passages.
         self._append_public_assistant_message(state, answer)
+        if not feedback_enabled:
+            # Passive validation assessment intentionally observes the answer
+            # but cannot affect its reward, add simulator-derived text to the
+            # subsequent dialogue context, or alter retry depth. The policy's
+            # own visible answer remains in the dynamic dialogue history.
+            self._move_to_next_subtask(state)
+            return
         if judgement.level == 1:
             if self.settings.reward_mode in _FULL_AUXILIARY_CHANNEL_MODES:
                 event.components.update(
@@ -985,6 +1148,12 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
         depths = torch.full((bsz, response_length), -1, dtype=torch.long)
         component_values = {name: torch.zeros((bsz, response_length), dtype=torch.float32) for name in _COMPONENTS}
         component_masks = {name: torch.zeros((bsz, response_length), dtype=torch.bool) for name in _COMPONENTS}
+        turn_ppo_rewards = torch.zeros((bsz, response_length), dtype=torch.float32)
+        turn_ppo_reward_mask = torch.zeros((bsz, response_length), dtype=torch.bool)
+        # The critic represents the observation immediately before one entire
+        # action.  Its loss therefore uses only the first generated token of
+        # that action rather than every token in the XML/CoT serialization.
+        turn_ppo_value_mask = torch.zeros((bsz, response_length), dtype=torch.bool)
         offsets = response_encoded["offset_mapping"].tolist()
         for row, event_positions in enumerate(response_event_positions):
             for event_index, (event, end_char) in enumerate(event_positions):
@@ -1000,6 +1169,10 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
                 records[row]["subtasks"][event_index]["normalized_advantage"] = None
                 subtask_ids[row, column] = event.subtask_index
                 depths[row, column] = event.response_depth
+                first_positions = response_mask[row].nonzero(as_tuple=True)[0]
+                if not len(first_positions):
+                    raise RuntimeError("simulated-user action row has no generated tokens")
+                turn_ppo_value_mask[row, int(first_positions[0].item())] = True
                 for name, value in event.components.items():
                     if name not in component_values or value is None:
                         continue
@@ -1007,6 +1180,9 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
                         raise RuntimeError(f"simulated-user reward {name!r} is not finite")
                     component_values[name][row, column] = float(value)
                     component_masks[name][row, column] = True
+                if event.turn_ppo_reward is not None:
+                    turn_ppo_rewards[row, column] = float(event.turn_ppo_reward)
+                    turn_ppo_reward_mask[row, column] = True
 
         attention = torch.cat((prompt_mask, response_mask), dim=-1)
         positions = self.tensor_fn.create_position_ids(attention)
@@ -1019,6 +1195,9 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
             "position_ids": positions,
             "loss_mask": loss_mask,
             "sim_user_turn_boundary_mask": boundary,
+            "sim_user_turn_ppo_reward_values": turn_ppo_rewards,
+            "sim_user_turn_ppo_reward_mask": turn_ppo_reward_mask.to(torch.long),
+            "sim_user_turn_ppo_value_mask": turn_ppo_value_mask.to(torch.long),
             "sim_user_subtask_ids": subtask_ids,
             "sim_user_response_depths": depths,
             "sim_user_event_order": torch.tensor(row_event_orders, dtype=torch.long),
@@ -1069,6 +1248,8 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
             "answer_f1": event.answer_f1,
             "evidence_utility": event.evidence_utility,
             "search_efficiency": event.search_efficiency,
+            "uci": event.uci,
+            "turn_ppo_reward": event.turn_ppo_reward,
         }
 
     def _state_record(
@@ -1133,6 +1314,7 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
             generated = self._generate_with_gpu_padding(generation_input)
             decoded = self.tokenizer.batch_decode(generated.batch["responses"], skip_special_tokens=False)
             pending_tools: list[tuple[_State, _Event, AgentAction]] = []
+            pending_uci: list[tuple[_Event, _State, list[dict[str, Any]], str]] = []
             pending_judgements: list[tuple[_State, _Event, str]] = []
             for state, decoded_response in zip(active, decoded):
                 generated_text = decoded_response.replace("<|endoftext|>", "").strip()
@@ -1160,6 +1342,11 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
                         format_valid=False,
                         fallback_reason=action.error,
                     )
+                    self._assign_turn_ppo_terminal_reward(
+                        state=state,
+                        event=event,
+                        action=action,
+                    )
                     self._move_to_next_subtask(state, fallback_reason="format_invalid")
                     continue
                 if action.kind == "tool_call":
@@ -1172,6 +1359,11 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
                             trailing_content_discarded=trailing_content_discarded,
                             format_valid=False,
                             fallback_reason="tool_call_not_allowed",
+                        )
+                        self._assign_turn_ppo_terminal_reward(
+                            state=state,
+                            event=event,
+                            action=action,
                         )
                         self._move_to_next_subtask(state, fallback_reason=event.fallback_reason)
                         continue
@@ -1190,6 +1382,7 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
                     raw,
                     original_raw,
                     trailing_content_discarded,
+                    pending_uci,
                     pending_judgements,
                 )
 
@@ -1229,6 +1422,29 @@ class SimulatedUserGenerationManager(LLMGenerationManager):
                     state.tool_calls += 1
                     self._enforce_live_policy_context_budget(state)
 
+            if pending_uci:
+                uci_values, evidence_utilities = self._score_uci_batch(
+                    [(state, messages, gold) for event, state, messages, gold in pending_uci]
+                )
+                for (event, state, _messages, _gold), uci, evidence_utility in zip(
+                    pending_uci, uci_values, evidence_utilities
+                ):
+                    # This value is scored after removing the complete final
+                    # policy response.  It cannot be inflated by answer text
+                    # or private terminal <think> content.
+                    if self.settings.enable_evidence_utility:
+                        event.evidence_utility = evidence_utility
+                        event.components["evidence_utility"] = evidence_utility
+                    event.uci = uci
+                    event.components["uci"] = uci
+                    answer = parse_agent_action(
+                        event.raw_response,
+                        allow_clarify=self.settings.allow_clarify,
+                        allow_nonanswer=self.settings.allow_nonanswer,
+                        force_answer=event.response_depth > 1,
+                        max_search_queries=self.settings.max_search_queries,
+                    ).content
+                    pending_judgements.append((state, event, answer))
             for state, event, answer in pending_judgements:
                 self._handle_judgement(state, event, answer)
 

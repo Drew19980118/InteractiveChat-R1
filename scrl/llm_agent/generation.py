@@ -30,16 +30,41 @@ from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.utils.torch_functional import get_response_mask, pad_2d_list_to_length
 from verl.utils.reward_score.ground_truth import (
     select_answer_ground_truth,
-    select_static_chatr1_primary_answer_ground_truth_with_passage_ids,
+    select_static_chatr1_answer_ground_truth_with_passage_ids,
     select_static_convagent_answer_ground_truth_with_passage_ids,
 )
 from verl.utils.reward_score.static_chatr1 import static_chatr1_intent_rewards, static_chatr1_rewrite
-from verl.utils.reward_score.static_convagent import direct_evidence_coverage
+from verl.utils.reward_score.static_convagent import (
+    direct_evidence_coverage,
+    static_convagent_answer_references,
+)
 import numpy as np
 import traceback
 import torch.nn.functional as F
 from tools_server.util import MessageClient
 from tools_server.initialize_prompts import SYSTEM_PROMPT
+
+
+# The zero-shot ReAct baseline must receive a prompt that exposes exactly the
+# same terminal action space evaluated by the static ConvAgent protocol.  This
+# is deliberately independent of the generic IGPO tool-call prompt and of any
+# prompt embedded in trained ConvAgent checkpoints.
+STATIC_REACT_SYSTEM_PROMPT = """You are a ReAct conversational search assistant.
+For each turn, reason privately and then emit exactly one of the following XML forms, with no text outside the tags:
+
+<think>brief reasoning</think>
+<search>a single concise search query</search>
+
+<think>brief reasoning</think>
+<answer>the final answer to the user</answer>
+
+<think>brief reasoning</think>
+<clarify>a concise clarification question for the user</clarify>
+
+<think>brief reasoning</think>
+<nonanswer></nonanswer>
+
+Use <search> when retrieved evidence is needed. After receiving <information>, either search once more if necessary or finish with one terminal action. Use <clarify> only when essential information is missing or the request is ambiguous. Use an empty <nonanswer></nonanswer> only when the request should not receive an answer. Do not use tool_call, Markdown fences, or multiple action tags in one turn."""
 
 
 @dataclass
@@ -80,15 +105,18 @@ class GenerationConfig:
     max_model_len: Optional[int] = None
     max_response_length: int = 512
     context_safety_margin: int = 32
-    # Static ConvAgent data carries its own <search>/<information> prompt
-    # grammar. Keep it separate from InteractiveChat-R1's tool-call grammar.
+    # ConvAgent static data supplies its native <search>/<information> grammar.
     static_convagent_mode: bool = False
-    # Direct passage coverage reward used by the static ConvAgent baseline.
+    # Keep static ConvAgent rollout and action semantics, but inject an
+    # explicit ReAct prompt for a zero-shot native Qwen policy.
+    static_react_mode: bool = False
     static_convagent_direct_evidence_reward: bool = False
     static_convagent_short_answer_tokens: int = 4
-    # Static ChatR1 uses the same released <search>/<information> grammar but
-    # its intermediate signal is query--human-rewrite F1, not evidence
-    # coverage or frozen-model information gain.
+    # Paper-faithful ConvAgent uses concatenated top-k evidence and combines
+    # outcome, information gain, and MIA before trajectory-level GRPO.
+    static_convagent_paper_reward: bool = False
+    # ChatR1 uses the same search grammar, but does not expose ConvAgent's
+    # clarification action or action-supervision labels.
     static_chatr1_mode: bool = False
     static_chatr1_intent_reward: bool = False
     
@@ -108,12 +136,20 @@ class LLMGenerationManager:
         self.is_validation = is_validation
         if config.static_convagent_mode and config.static_chatr1_mode:
             raise ValueError("static_convagent_mode and static_chatr1_mode are mutually exclusive")
+        if config.static_react_mode and not config.static_convagent_mode:
+            raise ValueError("static_react_mode requires static_convagent_mode=true")
+        if config.static_react_mode and config.static_chatr1_mode:
+            raise ValueError("static_react_mode and static_chatr1_mode are mutually exclusive")
         self.static_search_mode = bool(config.static_convagent_mode or config.static_chatr1_mode)
-        # ConvAgent's static Parquet contains the complete task instruction,
-        # including the <search> / <information> protocol. Do not prepend the
-        # InteractiveChat-R1 tool-call prompt in this mode.
-        self.system_prompt = "" if self.static_search_mode else (config.system_prompt or "")
-        if config.allow_nonanswer:
+        # Trained static policies use the protocol embedded in their released
+        # data prompts. The zero-shot ReAct baseline instead needs its own
+        # explicit grammar so a native Qwen can emit the evaluated action set.
+        self.system_prompt = (
+            STATIC_REACT_SYSTEM_PROMPT
+            if config.static_react_mode
+            else ("" if self.static_search_mode else (config.system_prompt or ""))
+        )
+        if config.allow_nonanswer and not config.static_react_mode:
             # The base prompt says there are two forms. This appended instruction
             # deliberately overrides that wording only for action-labelled data.
             self.system_prompt += (
@@ -510,10 +546,7 @@ class LLMGenerationManager:
                     results.append((True, "", ""))
                     continue
                 clarification = content.split("<clarify>", 1)[1].split("</clarify>", 1)[0]
-                if clarification.strip():
-                    results.append((True, think_content, clarification))
-                else:
-                    results.append((True, "", ""))
+                results.append((True, think_content, clarification) if clarification.strip() else (True, "", ""))
             elif has_nonanswer:
                 if (
                     not self.config.allow_nonanswer
@@ -535,13 +568,7 @@ class LLMGenerationManager:
                 if not query:
                     results.append((True, "", ""))
                     continue
-                results.append(
-                    (
-                        False,
-                        think_content,
-                        {"name": "web_search", "arguments": {"query": [query]}},
-                    )
-                )
+                results.append((False, think_content, {"name": "web_search", "arguments": {"query": [query]}}))
             elif has_tool_call and self.codeact_env_disabled:
                 if "<tool_call>" not in content or "</tool_call>" not in content:
                     results.append((True, "", ""))
@@ -758,30 +785,29 @@ class LLMGenerationManager:
         
         messages_list = []
         agent_grpo_idx = []
-        # The reward manager later consumes the original nested candidate
-        # labels.  Generation needs a flattened primary answer only for its
-        # legacy pseudo-logprob plumbing, so never mutate DataProto metadata
-        # in place.
+        # Keep the original nested labels attached to the rollout data.  Only
+        # the local pseudo-logprob copy is flattened to one answer string;
+        # reward computation later receives the unmodified source label and
+        # therefore retains all acceptable references.
         ground_truths = copy.deepcopy(ground_truths)
         for gt in ground_truths:
-            # ConvAgent stores a list of {action, response, passage_id, ...}
-            # candidates.  IGPO uses the first answer candidate; samples with
-            # no answer candidate deliberately have an empty target and receive
-            # no outcome or information-gain reward.
+            # Static labels can carry multiple released answer alternatives.
+            # The local pseudo response must contain one string, whereas the
+            # actual terminal reward evaluates the generated answer against
+            # the complete set and takes max-F1.
             if self.config.static_chatr1_mode:
-                # Preserve the human rewrite before replacing the nested
-                # candidate list with one primary answer for legacy pseudo
-                # log-prob plumbing.  The outcome scorer itself still sees
-                # the original reward model and evaluates max-F1 over every
-                # reference candidate.
                 raw_ground_truth = gt.get('ground_truth', '')
                 gt['_static_chatr1_rewrite'] = static_chatr1_rewrite(raw_ground_truth)
-                gt['ground_truth'] = select_static_chatr1_primary_answer_ground_truth_with_passage_ids(
+                gt['ground_truth'] = select_static_chatr1_answer_ground_truth_with_passage_ids(
                     raw_ground_truth
                 )[0]
             elif self.config.static_convagent_mode:
+                raw_ground_truth = gt.get('ground_truth', '')
+                gt['_static_convagent_answer_references'] = static_convagent_answer_references(
+                    raw_ground_truth
+                )
                 gt['ground_truth'] = select_static_convagent_answer_ground_truth_with_passage_ids(
-                    gt.get('ground_truth', '')
+                    raw_ground_truth
                 )[0]
             else:
                 gt['ground_truth'] = select_answer_ground_truth(gt.get('ground_truth', ''))
@@ -919,12 +945,7 @@ class LLMGenerationManager:
         # non-finite score). It must keep its turn boundary, but must not
         # participate in query-semantic normalization.
         info_gain_query_eligible = [[] for _ in range(len(messages_list))]
-        # For the static ConvAgent baseline, direct top-k evidence coverage is
-        # known as soon as a search has executed. It replaces legacy frozen
-        # likelihood-difference IG after the rollout is serialized.
         direct_evidence_rewards = [[] for _ in range(len(messages_list))]
-        # Populated after rollout completion.  ChatR1 defines a trace-level
-        # max query--rewrite F1; we credit the maximizing valid search action.
         static_chatr1_query_rewards = [[] for _ in range(len(messages_list))]
         first_retrieved_passages = [[] for _ in range(len(messages_list))]
         # One entry per completed tool action. ``None`` deliberately marks an
@@ -1243,7 +1264,23 @@ class LLMGenerationManager:
                         )
                     else:
                         activate_list_copy.append(activate_list[i])
-                        tool_call_list.append((activate_list[i], messages_list[activate_list[i]][1]["content"], results[i][1], results[i][2]))
+                        # Online rollouts usually begin with ``system, user``,
+                        # while the native static ConvAgent/ChatR1 prompts
+                        # deliberately retain only the released ``user``
+                        # message.  Never assume a user message is at index
+                        # one: retrieve the *initial* user turn so multi-search
+                        # tool requests keep their original task context.
+                        initial_user_content = next(
+                            (
+                                str(message.get("content", ""))
+                                for message in messages_list[activate_list[i]]
+                                if message.get("role") == "user"
+                            ),
+                            "",
+                        )
+                        tool_call_list.append(
+                            (activate_list[i], initial_user_content, results[i][1], results[i][2])
+                        )
                     
             tool_call_list = self.execute_predictions(tool_call_list,len(messages_list))
             print(f"node {node_rank}, turn {step} tool_call_list {len(tool_call_list)} datas")
@@ -1328,11 +1365,18 @@ class LLMGenerationManager:
                     first_retrieved_passages[sample_idx] = retrieved_passages
 
                 if self.config.static_convagent_direct_evidence_reward:
-                    gold_answer = ground_truths_rolling[sample_idx].get("ground_truth", "")
-                    coverage = direct_evidence_coverage(
-                        gold_answer,
-                        retrieved_passages,
-                        short_answer_token_threshold=self.config.static_convagent_short_answer_tokens,
+                    ground_truth = ground_truths_rolling[sample_idx]
+                    references = ground_truth.get("_static_convagent_answer_references", [])
+                    if not references:
+                        references = [ground_truth.get("ground_truth", "")]
+                    coverage = max(
+                        direct_evidence_coverage(
+                            reference,
+                            retrieved_passages,
+                            short_answer_token_threshold=self.config.static_convagent_short_answer_tokens,
+                            concatenate_passages=self.config.static_convagent_paper_reward,
+                        )
+                        for reference in references
                     )
                     direct_evidence_rewards[sample_idx].append(float(coverage))
             for i in range(len(tool_call_list)):
@@ -1683,16 +1727,9 @@ class LLMGenerationManager:
         #     json.dump({"gt_log_probs_per_turn": gt_log_probs_per_turn, "gt_entropys_per_turn": gt_entropys_per_turn}, f)
 
         if self.config.static_convagent_direct_evidence_reward:
-            # The direct evidence reward is intentionally not a likelihood
-            # delta. One value belongs to each executed <search> action and is
-            # later normalized as the intermediate reward channel by GRPO.
             info_gain_rewards = direct_evidence_rewards
-            info_gain_query_eligible = [
-                [True] * len(rewards) for rewards in direct_evidence_rewards
-            ]
-            rewrite_bound_rewards = [
-                [None] * len(rewards) for rewards in direct_evidence_rewards
-            ]
+            info_gain_query_eligible = [[True] * len(rewards) for rewards in direct_evidence_rewards]
+            rewrite_bound_rewards = [[None] * len(rewards) for rewards in direct_evidence_rewards]
             print(
                 "[StaticConvAgent] direct evidence rewards: "
                 f"{sum(len(rewards) for rewards in direct_evidence_rewards)} search actions",
@@ -1708,12 +1745,8 @@ class LLMGenerationManager:
                 for index, queries in enumerate(tool_action_queries)
             ]
             info_gain_rewards = static_chatr1_query_rewards
-            info_gain_query_eligible = [
-                [True] * len(rewards) for rewards in static_chatr1_query_rewards
-            ]
-            rewrite_bound_rewards = [
-                [None] * len(rewards) for rewards in static_chatr1_query_rewards
-            ]
+            info_gain_query_eligible = [[True] * len(rewards) for rewards in static_chatr1_query_rewards]
+            rewrite_bound_rewards = [[None] * len(rewards) for rewards in static_chatr1_query_rewards]
             print(
                 "[StaticChatR1] intent rewards: "
                 f"{sum(len(rewards) for rewards in static_chatr1_query_rewards)} search actions",

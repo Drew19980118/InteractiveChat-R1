@@ -28,12 +28,6 @@ def _default_compute_score(
     static_convagent_mode: bool = False,
     static_chatr1_mode: bool = False,
 ):
-    """Dispatch reward scoring while preserving static-baseline mode flags.
-
-    ``NaiveRewardManager`` always owns the static ConvAgent/ChatR1 switches.
-    They must reach the information-gain scorer so it can canonicalize the
-    released static labels and parse the corresponding action grammar.
-    """
     if type(data_source) != str:
         reslist = []
         if val_type == 'llm':

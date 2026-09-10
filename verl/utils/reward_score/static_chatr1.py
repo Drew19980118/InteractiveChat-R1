@@ -1,16 +1,9 @@
-"""Static ChatR1-style supervision utilities.
+"""Static ChatR1-style supervision helpers shared with InteractiveChat-R1.
 
-ChatR1's released static Parquets retain one or more answer candidates per
-turn.  Each candidate may also contain a human standalone query rewrite.  The
-baseline objective is therefore deliberately different from the interactive
-user-centric objective:
-
-* outcome reward: maximum word-level answer F1 across answer candidates;
-* intermediate reward: maximum word-level F1 between an executed search
-  query and the human rewrite, credited to the best query in that trajectory.
-
-The helpers accept Arrow/NumPy objects as well as ordinary Python mappings so
-the same logic works before and after Parquet collation.
+The released ChatR1 Parquets retain one or more answer candidates per turn.
+Each answer candidate can also contain the human standalone-query rewrite used
+by the original method's intermediate query reward.  Validation needs the
+same candidate normalization even when that training-only reward is disabled.
 """
 
 from __future__ import annotations
@@ -22,7 +15,7 @@ from .static_convagent import token_set_f1
 
 
 def _as_python(value: Any) -> Any:
-    """Convert Arrow/NumPy scalars or arrays without changing plain objects."""
+    """Convert Arrow/NumPy containers without changing ordinary Python data."""
     if hasattr(value, "as_py"):
         return value.as_py()
     if hasattr(value, "tolist") and not isinstance(value, (str, bytes, bytearray)):
@@ -31,7 +24,6 @@ def _as_python(value: Any) -> Any:
 
 
 def _candidates(ground_truth: Any) -> list[Mapping[str, Any]]:
-    """Extract the released ChatR1 candidate list from nested reward metadata."""
     value = _as_python(ground_truth)
     if isinstance(value, Mapping):
         if "ground_truth" in value:
@@ -43,18 +35,35 @@ def _candidates(ground_truth: Any) -> list[Mapping[str, Any]]:
 
 
 def _answer_candidates(ground_truth: Any) -> list[Mapping[str, Any]]:
-    candidates = _candidates(ground_truth)
-    # QReCC omits ``action`` because every row is answerable.  InsCiT retains
-    # the explicit answer tag after ChatR1's clarification-turn filtering.
+    # QReCC omits ``action`` because all rows are answerable.  InsCiT retains
+    # it after ChatR1's clarification-turn filtering.
     return [
         candidate
-        for candidate in candidates
+        for candidate in _candidates(ground_truth)
         if str(candidate.get("action", "answer")).strip().lower() in {"", "answer"}
     ]
 
 
+def static_chatr1_answer_candidates(ground_truth: Any) -> list[dict[str, Any]]:
+    """Return copied, non-empty released answer candidates.
+
+    The max-reference training view keeps these candidates together in one
+    source row; the older expansion utility may still use this helper when an
+    explicitly per-reference diagnostic dataset is desired.
+    """
+    candidates: list[dict[str, Any]] = []
+    for candidate in _answer_candidates(ground_truth):
+        response = str(candidate.get("response", "") or "").strip()
+        if not response:
+            continue
+        copied = dict(candidate)
+        copied["response"] = response
+        candidates.append(copied)
+    return candidates
+
+
 def static_chatr1_answer_references(ground_truth: Any) -> list[str]:
-    """Return all non-empty answer references in dataset order, de-duplicated."""
+    """Return released answer references in dataset order, de-duplicated."""
     references: list[str] = []
     seen: set[str] = set()
     for candidate in _answer_candidates(ground_truth):
@@ -70,12 +79,12 @@ def static_chatr1_answer_references(ground_truth: Any) -> list[str]:
 
 
 def static_chatr1_reference_string(ground_truth: Any) -> str:
-    """Encode all references using the scorer's existing multi-answer marker."""
+    """Encode references using the evaluator's established multi-answer tag."""
     return "<|answer_split|>".join(static_chatr1_answer_references(ground_truth))
 
 
 def static_chatr1_primary_answer_and_passage_ids(ground_truth: Any) -> tuple[str, list[str]]:
-    """Return a primary answer for pseudo scoring plus the union of gold passages."""
+    """Return a primary answer and the union of answer-candidate passages."""
     references = static_chatr1_answer_references(ground_truth)
     passage_ids: list[str] = []
     seen: set[str] = set()
@@ -97,7 +106,7 @@ def static_chatr1_primary_answer_and_passage_ids(ground_truth: Any) -> tuple[str
 
 
 def static_chatr1_rewrite(ground_truth: Any) -> str:
-    """Return the first human standalone rewrite supplied for the source turn."""
+    """Return the first human standalone rewrite for a source turn."""
     for candidate in _answer_candidates(ground_truth):
         rewrite = str(candidate.get("rewrite", "") or "").strip()
         if rewrite:
@@ -106,12 +115,7 @@ def static_chatr1_rewrite(ground_truth: Any) -> str:
 
 
 def static_chatr1_intent_rewards(queries: Sequence[str | None], rewrite: str) -> list[float]:
-    """Credit ChatR1's max query--rewrite score to the best executed query.
-
-    The trace-level paper reward is ``max_q F1(q, rewrite)``.  Giving that
-    value to only the maximizing action preserves the exact trace reward while
-    avoiding duplicate credit when a policy issues several searches.
-    """
+    """Credit max query--rewrite F1 to the matching executed search action."""
     rewards = [0.0] * len(queries)
     if not rewrite:
         return rewards

@@ -1,23 +1,25 @@
 #!/usr/bin/env bash
-# Convert a full FSDP PPO checkpoint into a standalone actor-only Hugging Face
-# model directory.  This is for inference/validation transfer only; it cannot
-# resume RL training because optimizer, critic, scheduler, and RNG state are
-# intentionally omitted.
+# Convert a selected FSDP PPO checkpoint into an actor-only HF model.
+# Set ACTOR_EXPORT_MODEL_ONLY=true only to recover complete actor model shards
+# from an interrupted checkpoint.  That path cannot resume PPO training.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$PROJECT_ROOT"
 
-: "${CHECKPOINT_PATH:?Set CHECKPOINT_PATH to the full global_step_* directory.}"
-: "${MODEL_PATH:?Set MODEL_PATH to the original Qwen base-model directory.}"
-: "${TRAIN_FILE:?Set TRAIN_FILE to any compatible static training Parquet; it is only used to initialize the runtime.}"
-: "${ACTOR_EXPORT_DIR:?Set ACTOR_EXPORT_DIR to a new, empty destination directory.}"
+: "${CHECKPOINT_PATH:?Set CHECKPOINT_PATH to the selected global_step_* directory.}"
+: "${MODEL_PATH:?Set MODEL_PATH to the original Qwen base model.}"
+: "${TRAIN_FILE:?Set TRAIN_FILE to the matching static train Parquet.}"
+: "${ACTOR_EXPORT_DIR:?Set ACTOR_EXPORT_DIR to a new empty directory.}"
 : "${CUDA_VISIBLE_DEVICES:?Set CUDA_VISIBLE_DEVICES to the checkpoint FSDP GPU count.}"
 
+INTERACTIVECHAT_CONDA_ENV="${INTERACTIVECHAT_CONDA_ENV:-${IGPO_CONDA_ENV:-interactivechat-r1}}"
+IGPO_CONDA_ENV="$INTERACTIVECHAT_CONDA_ENV"
 N_GPUS="${N_GPUS:-2}"
 ULYSSES_SEQUENCE_PARALLEL_SIZE="${ULYSSES_SEQUENCE_PARALLEL_SIZE:-$N_GPUS}"
 ACTOR_EXPORT_MAX_SHARD_SIZE="${ACTOR_EXPORT_MAX_SHARD_SIZE:-2GB}"
 ACTOR_EXPORT_ROLLOUT_GPU_MEMORY_UTILIZATION="${ACTOR_EXPORT_ROLLOUT_GPU_MEMORY_UTILIZATION:-0.15}"
+ACTOR_EXPORT_MODEL_ONLY="${ACTOR_EXPORT_MODEL_ONLY:-false}"
 RUNTIME_DIR="${ACTOR_EXPORT_RUNTIME_DIR:-$PROJECT_ROOT/outputs/actor_export_runtime}"
 DATA_WRITING_DIR="${ACTOR_EXPORT_DATA_WRITING_DIR:-$RUNTIME_DIR/data_writing}"
 
@@ -37,6 +39,19 @@ if (( N_GPUS < 1 || ULYSSES_SEQUENCE_PARALLEL_SIZE < 1 || N_GPUS % ULYSSES_SEQUE
   echo "ERROR: invalid N_GPUS / ULYSSES_SEQUENCE_PARALLEL_SIZE." >&2
   exit 2
 fi
+if [[ "$ACTOR_EXPORT_MODEL_ONLY" != "true" && "$ACTOR_EXPORT_MODEL_ONLY" != "false" ]]; then
+  echo "ERROR: ACTOR_EXPORT_MODEL_ONLY must be true or false." >&2
+  exit 2
+fi
+if [[ "$ACTOR_EXPORT_MODEL_ONLY" == "true" ]]; then
+  for ((rank = 0; rank < N_GPUS; rank++)); do
+    shard="$CHECKPOINT_PATH/actor/model_world_size_${N_GPUS}_rank_${rank}.pt"
+    if [[ ! -s "$shard" ]]; then
+      echo "ERROR: missing or empty actor model shard: $shard" >&2
+      exit 2
+    fi
+  done
+fi
 
 EXPORT_STEP="${CHECKPOINT_PATH##*global_step_}"
 if ! [[ "$EXPORT_STEP" =~ ^[0-9]+$ ]]; then
@@ -44,8 +59,15 @@ if ! [[ "$EXPORT_STEP" =~ ^[0-9]+$ ]]; then
   exit 2
 fi
 
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate "$IGPO_CONDA_ENV"
+export CUDA_VISIBLE_DEVICES TOKENIZERS_PARALLELISM=false PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1
+export PET_NODE_RANK="${PET_NODE_RANK:-0}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+export RAY_memory_monitor_refresh_ms=0 VLLM_ATTENTION_BACKEND=XFORMERS
 mkdir -p "$RUNTIME_DIR" "$DATA_WRITING_DIR"
-echo "[Actor export] source=$CHECKPOINT_PATH"
+
+echo "[Actor export] source=$CHECKPOINT_PATH model_only=$ACTOR_EXPORT_MODEL_ONLY"
 echo "[Actor export] destination=$ACTOR_EXPORT_DIR shards=$ACTOR_EXPORT_MAX_SHARD_SIZE gpus=$N_GPUS"
 
 python -u -m verl.trainer.main_ppo \
@@ -93,6 +115,7 @@ python -u -m verl.trainer.main_ppo \
   "trainer.val_before_train=false" \
   "trainer.resume_mode=resume_path" \
   "trainer.resume_from_path=$CHECKPOINT_PATH" \
+  "+trainer.resume_model_only=$ACTOR_EXPORT_MODEL_ONLY" \
   "trainer.export_actor_hf_path=$ACTOR_EXPORT_DIR" \
   "trainer.export_actor_hf_max_shard_size=$ACTOR_EXPORT_MAX_SHARD_SIZE" \
   "trainer.n_gpus_per_node=$N_GPUS" \

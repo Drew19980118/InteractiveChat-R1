@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compute requested answer/retrieval metrics for one InteractiveChat-R1 validation JSONL.
+"""Compute requested answer/retrieval metrics for one IGPO validation JSONL.
 
 For simulated-user validation, ``answer_raw_response`` is the last valid
 user-visible answer within the original sub-task.  Otherwise ``raw_response``
@@ -14,10 +14,15 @@ import json
 import math
 import re
 import unicodedata
-import string
 from pathlib import Path
 from statistics import fmean
 from typing import Any
+
+from verl.utils.reward_score.static_convagent import (
+    primary_answer_reference,
+    token_set_f1_max_reference,
+    token_set_f1_primary_reference,
+)
 
 
 ANSWER_PATTERN = re.compile(r"<answer>(.*?)</answer>", flags=re.DOTALL | re.IGNORECASE)
@@ -25,7 +30,7 @@ ANSWER_PATTERN = re.compile(r"<answer>(.*?)</answer>", flags=re.DOTALL | re.IGNO
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", required=True, type=Path, help="Validation JSONL.")
+    parser.add_argument("--input", required=True, type=Path, help="IGPO validation JSONL.")
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--bert-score-model", default="roberta-large")
     parser.add_argument("--bert-score-batch-size", default=16, type=int)
@@ -33,7 +38,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--multi-reference",
         action="store_true",
-        help="Score BERTScore against every <|answer_split|> reference and retain the best value.",
+        help=(
+            "Treat <|answer_split|>-delimited answer labels as separate references and "
+            "take the maximum F1 and BERTScore F1 over them. This is required by "
+            "the shared max-reference baseline and Turn-PPO protocol."
+        ),
     )
     parser.add_argument(
         "--simulated-user-batches-evaluated",
@@ -74,13 +83,10 @@ def as_string_list(value: Any) -> list[str]:
 
 
 def as_action_set(value: Any) -> set[str]:
-    """Decode canonical and static-ConvAgent allowed action annotations."""
+    """Decode one canonical action or a static-ConvAgent action set."""
     if value is None:
         return set()
-    if isinstance(value, (list, tuple, set)):
-        values = value
-    else:
-        values = [value]
+    values = value if isinstance(value, (list, tuple, set)) else [value]
     return {
         as_text(item).strip().lower()
         for item in values
@@ -121,34 +127,16 @@ def select_text_answer_raw_response(row: dict[str, Any]) -> tuple[str, str]:
     return as_text(row.get("raw_response", "")), "terminal"
 
 
-def normalize_for_f1(text: str) -> str:
-    # Same normalization as verl.utils.reward_score.info_gain.compute_f1.
-    text = text.lower()
-    for punctuation in string.punctuation:
-        text = text.replace(punctuation, " ")
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def answer_f1(predicted_answer: str, ground_truth_answer: str) -> float:
-    """Token-set F1, taking the maximum across <|answer_split|> labels."""
-    if not predicted_answer or not ground_truth_answer:
-        return 0.0
-    predicted_tokens = set(normalize_for_f1(predicted_answer).split())
-    if not predicted_tokens:
-        return 0.0
-
-    best = 0.0
-    for reference in ground_truth_answer.split("<|answer_split|>"):
-        reference_tokens = set(normalize_for_f1(reference).split())
-        if not reference_tokens:
-            continue
-        overlap = len(predicted_tokens & reference_tokens)
-        if not overlap:
-            continue
-        precision = overlap / len(predicted_tokens)
-        recall = overlap / len(reference_tokens)
-        best = max(best, 2 * precision * recall / (precision + recall))
-    return best
+def answer_f1(
+    predicted_answer: str,
+    ground_truth_answer: str,
+    *,
+    multi_reference: bool,
+) -> float:
+    """Token-set F1 against the selected reference rule."""
+    if multi_reference:
+        return token_set_f1_max_reference(predicted_answer, ground_truth_answer)
+    return token_set_f1_primary_reference(predicted_answer, ground_truth_answer)
 
 
 def _canonical_passage_text(value: Any) -> str:
@@ -220,20 +208,27 @@ def calculate_bertscore(
             "BERTScore is not installed. Run: python -m pip install 'bert-score==0.3.13'"
         ) from exc
 
-    pairs: list[tuple[int, str, str]] = []
+    # BERTScore has no native "max over references" mode. Expand each sample
+    # into prediction/reference pairs, score them in one batch, then retain
+    # the best score for the one policy prediction.
+    candidates: list[str] = []
+    references: list[str] = []
+    source_indices: list[int] = []
     for index in valid_indices:
-        references = (
+        raw_references = (
             records[index]["ground_truth_answer"].split("<|answer_split|>")
             if multi_reference
-            else [records[index]["ground_truth_answer"]]
+            else [primary_answer_reference(records[index]["ground_truth_answer"])]
         )
-        for reference in references:
-            if reference.strip():
-                pairs.append((index, records[index]["predicted_answer"], reference))
-    if not pairs:
+        for reference in raw_references:
+            reference = reference.strip()
+            if not reference:
+                continue
+            candidates.append(records[index]["predicted_answer"])
+            references.append(reference)
+            source_indices.append(index)
+    if not candidates:
         return
-    candidates = [candidate for _index, candidate, _reference in pairs]
-    references = [reference for _index, _candidate, reference in pairs]
     _, _, f1_values = bert_score(
         candidates,
         references,
@@ -245,8 +240,11 @@ def calculate_bertscore(
         rescale_with_baseline=False,
         verbose=True,
     )
-    for (index, _candidate, _reference), value in zip(pairs, f1_values.tolist(), strict=True):
-        records[index]["bertscore_f1"] = max(records[index]["bertscore_f1"], float(value))
+    best_scores: dict[int, float] = {}
+    for index, value in zip(source_indices, f1_values.tolist(), strict=True):
+        best_scores[index] = max(best_scores.get(index, 0.0), float(value))
+    for index, value in best_scores.items():
+        records[index]["bertscore_f1"] = value
 
 
 def read_jsonl(input_path: Path) -> list[dict[str, Any]]:
@@ -267,18 +265,6 @@ def read_jsonl(input_path: Path) -> list[dict[str, Any]]:
     if not rows:
         raise ValueError(f"Validation JSONL is empty: {input_path}")
     return rows
-
-
-def infer_checkpoint_step(input_path: Path) -> int | None:
-    """Infer the zero-based checkpoint step from a trainer validation JSONL.
-
-    Static baseline launchers name their validation export ``<global_step>.jsonl``.
-    Returning ``None`` preserves compatibility with manually named JSONL files.
-    """
-    try:
-        return int(input_path.stem)
-    except ValueError:
-        return None
 
 
 def main() -> None:
@@ -336,7 +322,11 @@ def main() -> None:
                 "predicted_passage_texts": predicted_passage_texts,
                 "retrieval_match_mode": retrieval_match_mode,
                 "evaluation_mode": evaluation_mode,
-                "f1": answer_f1(predicted_answer, ground_truth_answer),
+                "f1": answer_f1(
+                    predicted_answer,
+                    ground_truth_answer,
+                    multi_reference=args.multi_reference,
+                ),
                 "bertscore_f1": 0.0,
                 "ndcg_at_3": ndcg_at_3(
                     predicted_passages,
@@ -350,8 +340,11 @@ def main() -> None:
                 "simulator_level": row.get("simulator_level"),
                 "simulator_status": as_text(row.get("simulator_status", "")),
                 "simulator_feedback_enabled": bool(row.get("simulator_feedback_enabled", False)),
-                "simulator_satisfaction_assessed": bool(
-                    row.get("simulator_satisfaction_assessed", row.get("simulator_feedback_enabled", False))
+                "simulator_satisfaction_evaluation_enabled": bool(
+                    row.get("simulator_satisfaction_evaluation_enabled", False)
+                ),
+                "simulator_passive_satisfaction_evaluation": bool(
+                    row.get("simulator_passive_satisfaction_evaluation", False)
                 ),
                 "simulator_judgement_count": as_float(row.get("simulator_judgement_count")) or 0.0,
                 "simulator_fallback_count": as_float(row.get("simulator_fallback_count")) or 0.0,
@@ -393,13 +386,24 @@ def main() -> None:
     simulated_user_records = [
         record for record in per_sample if record["evaluation_mode"] == "simulated_user"
     ]
+    # A static run can be annotated after generation by the frozen simulator.
+    # This is deliberately separate from online records: there was no feedback
+    # and no retry, so it must not be reported as an interactive trajectory.
+    static_satisfaction_records = [
+        record
+        for record in per_sample
+        if record["evaluation_mode"] == "static"
+        and bool(record["simulator_satisfaction_evaluation_enabled"])
+    ]
     online_metrics: dict[str, float] = {}
     if simulated_user_records:
-        feedback_enabled = any(
-            bool(record["simulator_feedback_enabled"]) for record in simulated_user_records
+        satisfaction_evaluation_enabled = any(
+            bool(record["simulator_satisfaction_evaluation_enabled"])
+            or bool(record["simulator_feedback_enabled"])
+            for record in simulated_user_records
         )
-        satisfaction_assessed = any(
-            bool(record["simulator_satisfaction_assessed"])
+        passive_satisfaction_evaluation = any(
+            bool(record["simulator_passive_satisfaction_evaluation"])
             for record in simulated_user_records
         )
         available_batch_indices = {
@@ -442,43 +446,71 @@ def main() -> None:
             # is omitted rather than guessed from the sub-task count.
             **({"batches_evaluated": batches_evaluated} if batches_evaluated is not None else {}),
             **({"validation_truncated": validation_truncated} if validation_truncated is not None else {}),
+            **(
+                {"passive_satisfaction_evaluation": float(passive_satisfaction_evaluation)}
+                if satisfaction_evaluation_enabled
+                else {}
+            ),
         }
-        if satisfaction_assessed:
-            satisfaction_rate = fmean(
-                record["simulator_level"] == 1 for record in answer_labeled
-            ) if answer_labeled else 0.0
+        if satisfaction_evaluation_enabled:
             online_metrics.update(
                 {
-                    "level_1_rate": satisfaction_rate,
-                    "user_satisfaction_rate": satisfaction_rate,
+                    "level_1_rate": fmean(
+                        record["simulator_level"] == 1 for record in answer_labeled
+                    )
+                    if answer_labeled
+                    else 0.0,
                     "simulator_fallback_rate": (
                         sum(record["simulator_fallback_count"] for record in simulated_user_records)
                         / sum(record["simulator_judgement_count"] for record in simulated_user_records)
                         if sum(record["simulator_judgement_count"] for record in simulated_user_records)
                         else 0.0
                     ),
+                    "mean_retry_depth": fmean(
+                        record["retry_depth"] for record in answer_labeled
+                    )
+                    if answer_labeled
+                    else 0.0,
                 }
             )
-            if feedback_enabled:
-                online_metrics["mean_retry_depth"] = fmean(
-                    record["retry_depth"] for record in answer_labeled
-                ) if answer_labeled else 0.0
 
+    static_satisfaction_metrics: dict[str, float] = {}
+    if static_satisfaction_records:
+        static_answer_records = [
+            record
+            for record in answer_labeled
+            if bool(record["simulator_satisfaction_evaluation_enabled"])
+        ]
+        judgement_count = sum(record["simulator_judgement_count"] for record in static_satisfaction_records)
+        fallback_count = sum(record["simulator_fallback_count"] for record in static_satisfaction_records)
+        static_satisfaction_metrics = {
+            # The same semantic threshold as the online benchmark: only level
+            # 1 means the simulated user is satisfied.
+            "user_satisfaction_rate": fmean(
+                record["simulator_level"] == 1 for record in static_answer_records
+            )
+            if static_answer_records
+            else 0.0,
+            "simulator_fallback_rate": fallback_count / judgement_count if judgement_count else 0.0,
+            "passive_satisfaction_evaluation": 1.0,
+        }
+
+    f1_definition = (
+        "Answer-only maximum token-set F1 over all released answer references, using the terminal valid <answer> or latest valid <answer>; no valid answer is 0."
+        if args.multi_reference
+        else "Answer-only token-set F1 against the canonical first answer reference, using the terminal valid <answer>, otherwise the last valid answer in the same sub-task; no valid answer is 0."
+    )
+    bertscore_definition = (
+        "Answer-only maximum BERTScore F1 over all released answer references, using the terminal valid <answer> or latest valid <answer>; no valid answer is 0."
+        if args.multi_reference
+        else "Answer-only BERTScore F1 against the canonical first answer reference using the same terminal-or-last-valid answer fallback; no valid answer or empty label is 0."
+    )
     metric_definitions = {
-        "f1": "Answer-only token-set F1 of the terminal valid <answer>, otherwise the last valid answer in the same sub-task; no valid answer is 0.",
-        "bertscore_f1": "Answer-only BERTScore F1 using the same terminal-or-last-valid answer fallback; no valid answer or empty label is 0.",
+        "f1": f1_definition,
+        "bertscore_f1": bertscore_definition,
         "ndcg_at_3": "Answer-only binary NDCG@3. TopiOCQA uses normalized exact passage-text matching because its source and retriever IDs differ; other datasets use strict passage-ID matching. Empty labels are 0.",
         "action_accuracy": "Terminal action accuracy on action-labelled datasets; static ConvAgent rows may define a set of permissible actions.",
     }
-    if args.multi_reference:
-        metric_definitions["f1"] = (
-            "Answer-only maximum token-set F1 over all released answer references, "
-            "using the terminal valid <answer> or latest valid <answer>; no valid answer is 0."
-        )
-        metric_definitions["bertscore_f1"] = (
-            "Answer-only maximum BERTScore F1 over all released answer references, "
-            "using the terminal valid <answer> or latest valid <answer>; no valid answer is 0."
-        )
     if simulated_user_records:
         metric_definitions.update(
             {
@@ -489,26 +521,31 @@ def main() -> None:
                 "validation_truncated": "1.0 when validation was intentionally capped for a smoke test, otherwise 0.0.",
             }
         )
-        if any(bool(record["simulator_satisfaction_assessed"]) for record in simulated_user_records):
+        if any(
+            bool(record["simulator_satisfaction_evaluation_enabled"])
+            or bool(record["simulator_feedback_enabled"])
+            for record in simulated_user_records
+        ):
             metric_definitions.update(
                 {
-                    "level_1_rate": "Legacy alias of user_satisfaction_rate.",
-                    "user_satisfaction_rate": "Among answer-labelled sub-tasks, fraction whose terminal simulator assessment is level 1 (satisfied).",
+                    "level_1_rate": "Among answer-labelled sub-tasks, fraction whose terminal simulator assessment is level 1 (satisfied).",
                     "simulator_fallback_rate": "Among answer-labelled sub-tasks with a simulator judgement, fraction using the conservative fallback after two failed simulator calls.",
+                    "mean_retry_depth": "Mean terminal response depth among answer-labelled simulated-user sub-tasks; depth 1 means no retry.",
+                    "passive_satisfaction_evaluation": "1.0 when satisfaction is measured by a validation-only passive simulator judgement that cannot provide feedback or trigger retries; otherwise 0.0.",
                 }
             )
-        if any(bool(record["simulator_feedback_enabled"]) for record in simulated_user_records):
-            metric_definitions["mean_retry_depth"] = (
-                "Mean terminal response depth among answer-labelled simulated-user sub-tasks; depth 1 means no retry."
-            )
 
-    checkpoint_global_step = infer_checkpoint_step(args.input)
+    if static_satisfaction_records:
+        metric_definitions.update(
+            {
+                "user_satisfaction_rate": "Among answer-labelled static samples, fraction with a post-hoc frozen user-simulator level-1 judgement (satisfied). The simulator sees no gold answer and cannot provide feedback or retry.",
+                "simulator_fallback_rate": "Fraction of passive static simulator judgements using the conservative fallback after two failed/malformed simulator calls.",
+                "passive_satisfaction_evaluation": "1.0 when satisfaction is measured after static generation, without feedback, retries, reward, or trajectory changes.",
+            }
+        )
+
     summary = {
         "input_jsonl": str(args.input),
-        "checkpoint_global_step": checkpoint_global_step,
-        "checkpoint_completed_step": (
-            checkpoint_global_step + 1 if checkpoint_global_step is not None else None
-        ),
         "sample_count": len(per_sample),
         "terminal_answer_count": sum(record["has_terminal_answer"] for record in per_sample),
         "selected_answer_count": sum(record["has_selected_answer"] for record in per_sample),
@@ -520,7 +557,7 @@ def main() -> None:
         "action_label_count": len(action_labeled),
         "bertscore_model": args.bert_score_model,
         "bertscore_device": bertscore_device,
-        "multi_reference": bool(args.multi_reference),
+        "multi_reference": args.multi_reference,
         "metrics": {
             "f1": fmean(record["f1"] for record in answer_labeled) if answer_labeled else 0.0,
             "bertscore_f1": fmean(record["bertscore_f1"] for record in answer_labeled)
@@ -529,6 +566,7 @@ def main() -> None:
             "ndcg_at_3": fmean(record["ndcg_at_3"] for record in answer_labeled) if answer_labeled else 0.0,
             **({"action_accuracy": fmean(record["action_accuracy"] for record in action_labeled)} if action_labeled else {}),
             **online_metrics,
+            **static_satisfaction_metrics,
         },
         "metric_definitions": metric_definitions,
     }

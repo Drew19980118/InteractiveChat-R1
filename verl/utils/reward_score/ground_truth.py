@@ -5,7 +5,10 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from .static_convagent import static_convagent_allowed_actions, static_convagent_answer_and_passage_ids
+from .static_convagent import (
+    static_convagent_allowed_actions,
+    static_convagent_reference_string_and_passage_ids,
+)
 from .static_chatr1 import static_chatr1_primary_answer_and_passage_ids, static_chatr1_reference_string
 
 
@@ -166,18 +169,19 @@ def select_static_convagent_answer_ground_truth_with_passage_ids(
     ground_truth: Any,
     data_source: Any = None,
 ) -> tuple[str, list[str]]:
-    """Select the static ConvAgent answer target.
+    """Return all native static ConvAgent answer references and passage IDs.
 
-    Unlike the interactive conversion, static ConvAgent rows with both answer
-    and clarification candidates remain answer-supervised.  The action reward
-    separately recognises every candidate action as valid.
+    Static ConvAgent rows may contain both answer and clarification candidates.
+    A single model answer is evaluated against all released *answer*
+    alternatives using max F1/BERTScore; terminal action supervision separately
+    accepts every permissible candidate action.
     """
-    del data_source  # Kept for the same call signature as the interactive helper.
-    return static_convagent_answer_and_passage_ids(ground_truth)
+    del data_source
+    return static_convagent_reference_string_and_passage_ids(ground_truth)
 
 
 def select_static_convagent_expected_actions(ground_truth: Any, data_source: Any = None) -> set[str]:
-    """Return the permissible static ConvAgent terminal actions for one row."""
+    """Return every permissible static ConvAgent terminal action."""
     return static_convagent_allowed_actions(ground_truth, data_source=data_source)
 
 
@@ -185,12 +189,7 @@ def select_static_chatr1_primary_answer_ground_truth_with_passage_ids(
     ground_truth: Any,
     data_source: Any = None,
 ) -> tuple[str, list[str]]:
-    """Return ChatR1's primary answer plus every answer-candidate passage.
-
-    ``data_source`` is accepted for parity with the other selectors.  ChatR1's
-    released rows are already answer-only, so no dataset-specific action
-    filtering is needed here.
-    """
+    """Return ChatR1's primary answer plus all answer-candidate passages."""
     del data_source
     return static_chatr1_primary_answer_and_passage_ids(ground_truth)
 
@@ -199,7 +198,7 @@ def select_static_chatr1_answer_ground_truth_with_passage_ids(
     ground_truth: Any,
     data_source: Any = None,
 ) -> tuple[str, list[str]]:
-    """Return all ChatR1 answer references and the union of gold passages."""
+    """Return every ChatR1 answer reference and the union of gold passages."""
     del data_source
     _primary_answer, passage_ids = static_chatr1_primary_answer_and_passage_ids(ground_truth)
     return static_chatr1_reference_string(ground_truth), passage_ids

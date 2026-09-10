@@ -16,6 +16,7 @@ A unified tracking interface that supports logging data to different backend
 """
 
 import dataclasses
+import os
 from enum import Enum
 from functools import partial
 from pathlib import Path
@@ -41,12 +42,25 @@ class Tracking:
         if "tracking" in default_backend or "wandb" in default_backend:
             import wandb
 
-            wandb.init(project=project_name, name=experiment_name, config=config)
+            # Keep trainer.project_name stable for checkpoint paths while
+            # allowing multiple methods to be compared in one W&B project.
+            # Standard W&B environment variables are also convenient on a
+            # remote no-SSH session and do not place credentials in scripts.
+            wandb_kwargs = {
+                "project": os.environ.get("WANDB_PROJECT", project_name),
+                "name": experiment_name,
+                "config": config,
+            }
+            entity = os.environ.get("WANDB_ENTITY")
+            if entity:
+                wandb_kwargs["entity"] = entity
+            run_group = os.environ.get("WANDB_RUN_GROUP")
+            if run_group:
+                wandb_kwargs["group"] = run_group
+            wandb.init(**wandb_kwargs)
             self.logger["wandb"] = wandb
 
         if "mlflow" in default_backend:
-            import os
-
             import mlflow
 
             MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", None)
@@ -61,8 +75,6 @@ class Tracking:
             self.logger["mlflow"] = _MlflowLoggingAdapter()
 
         if "swanlab" in default_backend:
-            import os
-
             import swanlab
 
             SWANLAB_API_KEY = os.environ.get("SWANLAB_API_KEY", None)
@@ -80,8 +92,6 @@ class Tracking:
             self.logger["swanlab"] = swanlab
 
         if "vemlp_wandb" in default_backend:
-            import os
-
             import volcengine_ml_platform
             from volcengine_ml_platform import wandb as vemlp_wandb
 

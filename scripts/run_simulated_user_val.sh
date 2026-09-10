@@ -7,6 +7,8 @@ cd "$PROJECT_ROOT"
 
 : "${DATASET:?Set DATASET to inscit, topiocqa, qrecc, or coral.}"
 : "${MODEL_PATH:?Set MODEL_PATH to the matching base Qwen2.5 Instruct directory.}"
+: "${USER_SIMULATOR_BASE_URL:?Example: http://127.0.0.1:8010}"
+: "${USER_SIMULATOR_MODEL:?Set the served Qwen32B user-simulator name.}"
 : "${CUDA_VISIBLE_DEVICES:?Set validation GPUs not used by the simulator/retriever.}"
 
 case "$DATASET" in
@@ -28,7 +30,8 @@ case "$DATASET" in
     ;;
 esac
 
-INTERACTIVECHAT_CONDA_ENV="${INTERACTIVECHAT_CONDA_ENV:-interactivechat-r1}"
+INTERACTIVECHAT_CONDA_ENV="${INTERACTIVECHAT_CONDA_ENV:-${IGPO_CONDA_ENV:-interactivechat-r1}}"
+IGPO_CONDA_ENV="$INTERACTIVECHAT_CONDA_ENV"
 N_GPUS="${N_GPUS:-4}"
 ULYSSES_SEQUENCE_PARALLEL_SIZE="${ULYSSES_SEQUENCE_PARALLEL_SIZE:-$N_GPUS}"
 # In FSDP-resume mode this must be the source training parquet because the
@@ -46,9 +49,36 @@ MAX_TOOL_CALLS="${MAX_TOOL_CALLS:-4}"
 MAX_SEARCH_QUERIES="${MAX_SEARCH_QUERIES:-1}"
 SEARCH_TOP_K="${SEARCH_TOP_K:-3}"
 MAX_ANSWER_DEPTH="${MAX_ANSWER_DEPTH:-3}"
+SIMULATED_USER_REWARD_MODE="${SIMULATED_USER_REWARD_MODE:-full}"
+SIMULATED_USER_TURN_PPO="${SIMULATED_USER_TURN_PPO:-false}"
+# One actor answer is scored by its maximum match over the released answer
+# references. The Turn-PPO wrapper leaves this enabled for both dynamic and
+# static final reports.
+MULTI_REFERENCE="${MULTI_REFERENCE:-true}"
+TURN_PPO_GAMMA="${TURN_PPO_GAMMA:-0.99}"
+TURN_PPO_LAMBDA="${TURN_PPO_LAMBDA:-0.95}"
+TURN_PPO_ACTION_CORRECT_REWARD="${TURN_PPO_ACTION_CORRECT_REWARD:-0.0}"
+TURN_PPO_ACTION_INCORRECT_REWARD="${TURN_PPO_ACTION_INCORRECT_REWARD:--1.0}"
+TURN_PPO_NONANSWER_CORRECT_REWARD="${TURN_PPO_NONANSWER_CORRECT_REWARD:-0.2}"
+TURN_PPO_FORMAT_VALID_REWARD="${TURN_PPO_FORMAT_VALID_REWARD:-0.0}"
+TURN_PPO_FORMAT_INVALID_REWARD="${TURN_PPO_FORMAT_INVALID_REWARD:--1.0}"
+TURN_PPO_ANSWER_F1_WEIGHT="${TURN_PPO_ANSWER_F1_WEIGHT:-1.0}"
+TURN_PPO_CLARIFY_F1_WEIGHT="${TURN_PPO_CLARIFY_F1_WEIGHT:-1.0}"
 SIMULATED_USER_ENABLE_FEEDBACK="${SIMULATED_USER_ENABLE_FEEDBACK:-true}"
-SIMULATED_USER_ASSESS_SATISFACTION="${SIMULATED_USER_ASSESS_SATISFACTION:-false}"
+SIMULATED_USER_PASSIVE_SATISFACTION_EVALUATION="${SIMULATED_USER_PASSIVE_SATISFACTION_EVALUATION:-false}"
 SIMULATED_USER_STATIC_GOLD_CONTEXT="${SIMULATED_USER_STATIC_GOLD_CONTEXT:-false}"
+# Keep validation configuration auditable against the training run.  These
+# weights do not update a policy during ``val_only``, but they are preserved in
+# the resolved config and make any recorded reward diagnostics unambiguous.
+SIMULATED_USER_ACTION_WEIGHT="${SIMULATED_USER_ACTION_WEIGHT:-1.0}"
+SIMULATED_USER_ANSWER_F1_WEIGHT="${SIMULATED_USER_ANSWER_F1_WEIGHT:-1.0}"
+SIMULATED_USER_EVIDENCE_UTILITY_WEIGHT="${SIMULATED_USER_EVIDENCE_UTILITY_WEIGHT:-1.0}"
+SIMULATED_USER_SEARCH_EFFICIENCY_WEIGHT="${SIMULATED_USER_SEARCH_EFFICIENCY_WEIGHT:-0.25}"
+SIMULATED_USER_UCI_WEIGHT="${SIMULATED_USER_UCI_WEIGHT:-1.0}"
+SIMULATED_USER_CLARITY_WEIGHT="${SIMULATED_USER_CLARITY_WEIGHT:-1.0}"
+SIMULATED_USER_PATIENCE_WEIGHT="${SIMULATED_USER_PATIENCE_WEIGHT:-1.0}"
+SIMULATED_USER_FORMAT_WEIGHT="${SIMULATED_USER_FORMAT_WEIGHT:-1.0}"
+SIMULATED_USER_CLARIFY_F1_WEIGHT="${SIMULATED_USER_CLARIFY_F1_WEIGHT:-1.0}"
 # Dynamic-evidence default: retain a fresh top-3 in full, compact old
 # retrievals only if the live policy context requires it.
 TOOL_OBSERVATION_TOKEN_CAP="${TOOL_OBSERVATION_TOKEN_CAP:-0}"
@@ -73,14 +103,33 @@ if [[ ! -f "$TRAIN_FILE" || ! -f "$VAL_FILE" ]]; then
   echo "ERROR: missing parquet: TRAIN_FILE=$TRAIN_FILE VAL_FILE=$VAL_FILE" >&2
   exit 2
 fi
-for boolean_name in SIMULATED_USER_ENABLE_FEEDBACK SIMULATED_USER_ASSESS_SATISFACTION SIMULATED_USER_STATIC_GOLD_CONTEXT; do
+for boolean_name in \
+  SIMULATED_USER_TURN_PPO \
+  MULTI_REFERENCE \
+  SIMULATED_USER_ENABLE_FEEDBACK \
+  SIMULATED_USER_PASSIVE_SATISFACTION_EVALUATION \
+  SIMULATED_USER_STATIC_GOLD_CONTEXT; do
   boolean_value="${!boolean_name}"
   if [[ "$boolean_value" != "true" && "$boolean_value" != "false" ]]; then
     echo "ERROR: $boolean_name must be true or false." >&2
     exit 2
   fi
 done
-if [[ "$SIMULATED_USER_ENABLE_FEEDBACK" == "true" || "$SIMULATED_USER_ASSESS_SATISFACTION" == "true" ]]; then
+if [[ "$SIMULATED_USER_TURN_PPO" == "true" ]]; then
+  if [[ "$SIMULATED_USER_REWARD_MODE" != "turn_ppo" ]]; then
+    echo "ERROR: Turn-PPO validation requires SIMULATED_USER_REWARD_MODE=turn_ppo." >&2
+    exit 2
+  fi
+  ADV_ESTIMATOR=gae
+else
+  if [[ "$SIMULATED_USER_REWARD_MODE" == "turn_ppo" ]]; then
+    echo "ERROR: turn_ppo reward mode requires SIMULATED_USER_TURN_PPO=true." >&2
+    exit 2
+  fi
+  ADV_ESTIMATOR=grpo
+fi
+if [[ "$SIMULATED_USER_ENABLE_FEEDBACK" == "true" \
+   || "$SIMULATED_USER_PASSIVE_SATISFACTION_EVALUATION" == "true" ]]; then
   : "${USER_SIMULATOR_BASE_URL:?Example: http://127.0.0.1:8010}"
   : "${USER_SIMULATOR_MODEL:?Set the served Qwen32B user-simulator name.}"
 fi
@@ -114,10 +163,9 @@ else
 fi
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
-conda activate "$INTERACTIVECHAT_CONDA_ENV"
+conda activate "$IGPO_CONDA_ENV"
 export CUDA_VISIBLE_DEVICES TOKENIZERS_PARALLELISM=false PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1
 export RAY_memory_monitor_refresh_ms=0 VLLM_ATTENTION_BACKEND=XFORMERS
-export IGPO_MAX_SEARCH_QUERIES="$MAX_SEARCH_QUERIES" IGPO_SEARCH_TOP_K="$SEARCH_TOP_K"
 
 python - <<'PY'
 import requests
@@ -136,7 +184,8 @@ mkdir -p "$OUTPUT_DIR" "$EVAL_DIR" "$PROJECT_ROOT/cache/task_queue"
 
 echo "[SimUser Val] dataset=$DATASET $LOAD_DESCRIPTION val_batch=256 gpus=$N_GPUS ulysses=$ULYSSES_SEQUENCE_PARALLEL_SIZE"
 echo "[SimUser Val] nonanswer=$ALLOW_NONANSWER_ACTION clarify=$SIMULATED_USER_ALLOW_CLARIFY queries/tool=$MAX_SEARCH_QUERIES topk=$SEARCH_TOP_K"
-echo "[SimUser Val] feedback=$SIMULATED_USER_ENABLE_FEEDBACK satisfaction_assessment=$SIMULATED_USER_ASSESS_SATISFACTION static_gold_context=$SIMULATED_USER_STATIC_GOLD_CONTEXT"
+echo "[SimUser Val] feedback=$SIMULATED_USER_ENABLE_FEEDBACK passive_satisfaction_eval=$SIMULATED_USER_PASSIVE_SATISFACTION_EVALUATION static_gold_context=$SIMULATED_USER_STATIC_GOLD_CONTEXT"
+echo "[SimUser Val] turn_ppo=$SIMULATED_USER_TURN_PPO adv_estimator=$ADV_ESTIMATOR"
 
 python -u -m verl.trainer.main_ppo \
   "data.train_files=$TRAIN_FILE" \
@@ -171,15 +220,38 @@ python -u -m verl.trainer.main_ppo \
   "actor_rollout_ref.rollout.temperature=1.0" \
   "critic.model.path=$MODEL_PATH" \
   "critic.optim.lr=0" \
+  "critic.ppo_mini_batch_size=$PPO_MINI_BATCH_SIZE" \
   "critic.ppo_micro_batch_size_per_gpu=1" \
-  "algorithm.adv_estimator=grpo" \
-  "algorithm.gamma=1.0" \
+  "critic.ppo_max_token_len_per_gpu=8192" \
+  "critic.use_dynamic_bsz=true" \
+  "critic.ulysses_sequence_parallel_size=$ULYSSES_SEQUENCE_PARALLEL_SIZE" \
+  "algorithm.adv_estimator=$ADV_ESTIMATOR" \
+  "algorithm.gamma=$TURN_PPO_GAMMA" \
+  "algorithm.lam=$TURN_PPO_LAMBDA" \
   "algorithm.query_group_advantage=disabled" \
   "algorithm.simulated_user_enabled=true" \
-  "algorithm.simulated_user_enable_feedback=$SIMULATED_USER_ENABLE_FEEDBACK" \
-  "algorithm.simulated_user_assess_satisfaction=$SIMULATED_USER_ASSESS_SATISFACTION" \
-  "algorithm.simulated_user_static_gold_context=$SIMULATED_USER_STATIC_GOLD_CONTEXT" \
+  "algorithm.simulated_user_reward_mode=$SIMULATED_USER_REWARD_MODE" \
+  "algorithm.simulated_user_turn_ppo=$SIMULATED_USER_TURN_PPO" \
+  "algorithm.simulated_user_turn_ppo_action_correct_reward=$TURN_PPO_ACTION_CORRECT_REWARD" \
+  "algorithm.simulated_user_turn_ppo_action_incorrect_reward=$TURN_PPO_ACTION_INCORRECT_REWARD" \
+  "algorithm.simulated_user_turn_ppo_nonanswer_correct_reward=$TURN_PPO_NONANSWER_CORRECT_REWARD" \
+  "algorithm.simulated_user_turn_ppo_format_valid_reward=$TURN_PPO_FORMAT_VALID_REWARD" \
+  "algorithm.simulated_user_turn_ppo_format_invalid_reward=$TURN_PPO_FORMAT_INVALID_REWARD" \
+  "algorithm.simulated_user_turn_ppo_answer_f1_weight=$TURN_PPO_ANSWER_F1_WEIGHT" \
+  "algorithm.simulated_user_turn_ppo_clarify_f1_weight=$TURN_PPO_CLARIFY_F1_WEIGHT" \
   "algorithm.simulated_user_mode=openai" \
+  "algorithm.simulated_user_enable_feedback=$SIMULATED_USER_ENABLE_FEEDBACK" \
+  "algorithm.simulated_user_passive_satisfaction_evaluation=$SIMULATED_USER_PASSIVE_SATISFACTION_EVALUATION" \
+  "algorithm.simulated_user_static_gold_context=$SIMULATED_USER_STATIC_GOLD_CONTEXT" \
+  "algorithm.simulated_user_action_weight=$SIMULATED_USER_ACTION_WEIGHT" \
+  "algorithm.simulated_user_answer_f1_weight=$SIMULATED_USER_ANSWER_F1_WEIGHT" \
+  "algorithm.simulated_user_evidence_utility_weight=$SIMULATED_USER_EVIDENCE_UTILITY_WEIGHT" \
+  "algorithm.simulated_user_search_efficiency_weight=$SIMULATED_USER_SEARCH_EFFICIENCY_WEIGHT" \
+  "algorithm.simulated_user_uci_weight=$SIMULATED_USER_UCI_WEIGHT" \
+  "algorithm.simulated_user_clarity_weight=$SIMULATED_USER_CLARITY_WEIGHT" \
+  "algorithm.simulated_user_patience_weight=$SIMULATED_USER_PATIENCE_WEIGHT" \
+  "algorithm.simulated_user_format_weight=$SIMULATED_USER_FORMAT_WEIGHT" \
+  "algorithm.simulated_user_clarify_f1_weight=$SIMULATED_USER_CLARIFY_F1_WEIGHT" \
   "algorithm.allow_nonanswer_action=$ALLOW_NONANSWER_ACTION" \
   "algorithm.simulated_user_allow_clarify=$SIMULATED_USER_ALLOW_CLARIFY" \
   "algorithm.simulated_user_max_tool_calls=$MAX_TOOL_CALLS" \
@@ -214,11 +286,16 @@ if [[ ! -f "$VALIDATION_JSON" ]]; then
   echo "ERROR: validation JSONL was not created: $VALIDATION_JSON" >&2
   exit 3
 fi
+METRIC_ARGS=()
+if [[ "$MULTI_REFERENCE" == "true" ]]; then
+  METRIC_ARGS=(--multi-reference)
+fi
 python -u scripts/compute_convagent_eval_metrics.py \
   --input "$VALIDATION_JSON" \
   --output-dir "$EVAL_DIR" \
   --bert-score-device "${BERT_SCORE_DEVICE:-cuda}" \
-  --bert-score-batch-size "${BERT_SCORE_BATCH_SIZE:-16}"
+  --bert-score-batch-size "${BERT_SCORE_BATCH_SIZE:-16}" \
+  "${METRIC_ARGS[@]}"
 
 echo "Completed evaluation: $EXPERIMENT_NAME"
 echo "Validation JSONL: $VALIDATION_JSON"

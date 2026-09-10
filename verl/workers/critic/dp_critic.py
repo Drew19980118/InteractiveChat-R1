@@ -174,6 +174,13 @@ class DataParallelPPOCritic(BasePPOCritic):
         metrics = {}
 
         select_keys = ["input_ids", "responses", "attention_mask", "position_ids", "values", "returns"]
+        # Turn-PPO evaluates one state value immediately before each complete
+        # macro action.  Its value loss must therefore be restricted to those
+        # action-start positions rather than learning a redundant critic target
+        # at every generated token.
+        has_turn_ppo_value_mask = "sim_user_turn_ppo_value_mask" in data.batch
+        if has_turn_ppo_value_mask:
+            select_keys.append("sim_user_turn_ppo_value_mask")
         batch = data.select(batch_keys=select_keys).batch
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
 
@@ -214,7 +221,11 @@ class DataParallelPPOCritic(BasePPOCritic):
                     returns = data["returns"]
                     response_length = responses.size(1)
 
-                    response_mask = attention_mask[:, -response_length - 1 : -1]
+                    if has_turn_ppo_value_mask:
+                        response_mask = data["sim_user_turn_ppo_value_mask"][:, -response_length:]
+                        response_mask = response_mask.to(dtype=attention_mask.dtype)
+                    else:
+                        response_mask = attention_mask[:, -response_length - 1 : -1]
 
                     vpreds = self._forward_micro_batch(data)
 

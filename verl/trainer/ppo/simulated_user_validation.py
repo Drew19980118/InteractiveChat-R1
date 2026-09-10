@@ -6,12 +6,13 @@ import json
 import os
 import re
 import unicodedata
-from collections import Counter, defaultdict
+from collections import defaultdict
 from typing import Any
 
 import numpy as np
 
 from verl import DataProto
+from verl.utils.reward_score.static_convagent import token_set_f1_max_reference
 
 
 def _answer(raw_response: str) -> str:
@@ -45,16 +46,8 @@ def select_answer_for_text_metrics(
 
 
 def _token_f1(prediction: str, reference: str) -> float:
-    prediction_tokens = str(prediction).lower().split()
-    reference_tokens = str(reference).lower().split()
-    if not prediction_tokens or not reference_tokens:
-        return 0.0
-    overlap = sum((Counter(prediction_tokens) & Counter(reference_tokens)).values())
-    if not overlap:
-        return 0.0
-    precision = overlap / len(prediction_tokens)
-    recall = overlap / len(reference_tokens)
-    return 2 * precision * recall / (precision + recall)
+    """Use the max-reference F1 used by Turn-PPO reward/final eval."""
+    return token_set_f1_max_reference(prediction, reference)
 
 
 def _canonical_passage_text(value: Any) -> str:
@@ -104,8 +97,11 @@ def validate_simulated_user(
     """
     manager = trainer._make_simulated_user_manager(n=1, is_validation=True)
     feedback_enabled = bool(manager.settings.enable_user_feedback)
-    satisfaction_assessed = bool(
-        feedback_enabled or manager.settings.assess_user_satisfaction
+    passive_satisfaction_evaluation = bool(
+        manager.settings.passive_satisfaction_evaluation
+    )
+    satisfaction_evaluation_enabled = (
+        feedback_enabled or passive_satisfaction_evaluation
     )
     rows: list[dict[str, Any]] = []
     try:
@@ -233,7 +229,8 @@ def validate_simulated_user(
                         "simulator_feedback": terminal["simulator_feedback"],
                         "simulator_status": terminal.get("simulator_status", ""),
                         "simulator_feedback_enabled": feedback_enabled,
-                        "simulator_satisfaction_assessed": satisfaction_assessed,
+                        "simulator_satisfaction_evaluation_enabled": satisfaction_evaluation_enabled,
+                        "simulator_passive_satisfaction_evaluation": passive_satisfaction_evaluation,
                         "simulator_judgement_count": len(simulator_statuses),
                         "simulator_fallback_count": sum(
                             status.startswith("fallback_") for status in simulator_statuses
@@ -283,29 +280,31 @@ def validate_simulated_user(
         "val/sim_user/subtasks": float(len(rows)),
         "val/sim_user/batches_evaluated": float(evaluated_batches),
         "val/sim_user/validation_truncated": float(validation_truncated),
+        "val/sim_user/passive_satisfaction_evaluation": float(
+            passive_satisfaction_evaluation
+        ),
     }
-    if satisfaction_assessed:
+    if satisfaction_evaluation_enabled:
         simulator_judgement_count = sum(row["simulator_judgement_count"] for row in rows)
         simulator_fallback_count = sum(row["simulator_fallback_count"] for row in rows)
-        satisfaction_rate = float(
-            np.mean([row["simulator_level"] == 1 for row in answer_rows])
-        ) if answer_rows else 0.0
         metrics.update(
             {
-                # Keep the legacy key for reproducibility while exposing the
-                # paper-facing name used in tables and ablations.
-                "val/sim_user/level_1_rate": satisfaction_rate,
-                "val/sim_user/user_satisfaction_rate": satisfaction_rate,
+                "val/sim_user/level_1_rate": float(
+                    np.mean([row["simulator_level"] == 1 for row in answer_rows])
+                )
+                if answer_rows
+                else 0.0,
                 "val/sim_user/simulator_fallback_rate": float(
                     simulator_fallback_count / simulator_judgement_count
                 )
                 if simulator_judgement_count
                 else 0.0,
+                "val/sim_user/mean_retry_depth": float(
+                    np.mean([row["retry_depth"] for row in answer_rows])
+                )
+                if answer_rows
+                else 0.0,
             }
         )
-        if feedback_enabled:
-            metrics["val/sim_user/mean_retry_depth"] = float(
-                np.mean([row["retry_depth"] for row in answer_rows])
-            ) if answer_rows else 0.0
     print("[SimUser Validation] metrics: " + json.dumps(metrics, sort_keys=True), flush=True)
     return metrics

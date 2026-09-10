@@ -67,12 +67,49 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             checkpoint_contents=checkpoint_contents,
         )
 
-    def load_checkpoint(self, local_path: str, hdfs_path: str = None, del_local_after_load=False):
+    def load_checkpoint(
+        self,
+        local_path: str,
+        hdfs_path: str = None,
+        del_local_after_load: bool = False,
+        model_only: bool = False,
+    ):
         if local_path is None:
             return
 
         # every rank download its own checkpoint
         remote_model_path = os.path.join(local_path, f"model_world_size_{self.world_size}_rank_{self.rank}.pt")
+        if model_only:
+            """Load an actor shard without optimizer, scheduler, or RNG state.
+
+            This is deliberately restricted to inference/export recovery.  It is
+            useful when an interrupted checkpoint contains complete FSDP model
+            shards but not the subsequently-written optimizer/extra-state
+            shards.  Such a checkpoint must never be used to resume training.
+            """
+            print(f"[rank-{self.rank}]: Model-only loading from {remote_model_path}")
+            local_model_path = copy_to_local(remote_model_path)
+            model_state_dict = torch.load(local_model_path, weights_only=False)
+
+            if del_local_after_load:
+                try:
+                    if is_non_local(local_model_path):
+                        os.remove(local_model_path)
+                except Exception as e:
+                    print(
+                        f"[rank-{self.rank}]: remove local model shard after loading "
+                        f"failed; ignoring exception {e}"
+                    )
+
+            state_dict_cfg = ShardedStateDictConfig(offload_to_cpu=True)
+            with FSDP.state_dict_type(
+                self.model,
+                StateDictType.SHARDED_STATE_DICT,
+                state_dict_cfg,
+            ):
+                self.model.load_state_dict(model_state_dict)
+            return
+
         remote_optim_path = os.path.join(local_path, f"optim_world_size_{self.world_size}_rank_{self.rank}.pt")
         remote_extra_state_path = os.path.join(local_path, f"extra_state_world_size_{self.world_size}_rank_{self.rank}.pt")
         print(f"[rank-{self.rank}]: Loading from {remote_model_path} and {remote_optim_path} and {remote_extra_state_path}")

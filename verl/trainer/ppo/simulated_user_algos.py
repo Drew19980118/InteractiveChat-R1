@@ -9,6 +9,148 @@ import numpy as np
 import torch
 
 
+def compute_simulated_user_turn_gae_advantage(
+    *,
+    turn_rewards: torch.Tensor,
+    turn_reward_mask: torch.Tensor,
+    turn_value_mask: torch.Tensor,
+    values: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    rollout_ids: np.ndarray,
+    row_subtasks: torch.Tensor,
+    event_orders: torch.Tensor,
+    gamma: float,
+    lam: float,
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
+    """Turn-level GAE for flattened simulated-user action rows.
+
+    Each row is one immutable ``observation -> complete policy action`` event.
+    The critic value is read only at the first generated token, which represents
+    the observation before the action.  Terminal action reward is stored at
+    the final generated token, but is reduced to one scalar ``r_t`` here.
+    The next value comes from the *next row* in the same
+    ``(dialogue, rollout, subtask)`` chain, because that row is the only exact
+    serialization of the environment's next observation (tool result or user
+    feedback included).
+
+    Actor advantages are broadcast to every generated token of the action;
+    critic returns are supervised only at the corresponding first-token state
+    via ``sim_user_turn_ppo_value_mask`` in the FSDP critic.
+    """
+    expected_shape = tuple(response_mask.shape)
+    for name, tensor in {
+        "turn_rewards": turn_rewards,
+        "turn_reward_mask": turn_reward_mask,
+        "turn_value_mask": turn_value_mask,
+        "values": values,
+    }.items():
+        if tuple(tensor.shape) != expected_shape:
+            raise ValueError(
+                f"simulated-user Turn-PPO {name} shape {tuple(tensor.shape)} "
+                f"does not match response mask {expected_shape}"
+            )
+    batch_size, _response_length = expected_shape
+    if len(index) != batch_size or len(rollout_ids) != batch_size:
+        raise ValueError("simulated-user Turn-PPO uid/rollout metadata length mismatch")
+    if tuple(row_subtasks.shape) != (batch_size,) or tuple(event_orders.shape) != (batch_size,):
+        raise ValueError(
+            "simulated-user Turn-PPO row_subtasks and event_orders must contain one value per row"
+        )
+    if not 0.0 <= float(gamma) <= 1.0:
+        raise ValueError("Turn-PPO gamma must be in [0, 1]")
+    if not 0.0 <= float(lam) <= 1.0:
+        raise ValueError("Turn-PPO lambda must be in [0, 1]")
+
+    advantages = torch.zeros_like(values, dtype=torch.float32)
+    returns = torch.zeros_like(values, dtype=torch.float32)
+    chains: dict[tuple[str, str, int], list[tuple[int, int, int, int]]] = defaultdict(list)
+    for row in range(batch_size):
+        valid_positions = response_mask[row].to(torch.bool).nonzero(as_tuple=True)[0]
+        boundary_positions = turn_reward_mask[row].to(torch.bool).nonzero(as_tuple=True)[0]
+        value_positions = turn_value_mask[row].to(torch.bool).nonzero(as_tuple=True)[0]
+        # DP padding rows are intentionally all-zero and must not participate.
+        if not len(valid_positions):
+            if len(boundary_positions) or len(value_positions):
+                raise RuntimeError("Turn-PPO padding row unexpectedly carries reward/value metadata")
+            continue
+        if len(value_positions) != 1:
+            raise RuntimeError("each Turn-PPO action row must have exactly one value-state position")
+        if int(value_positions[0].item()) != int(valid_positions[0].item()):
+            raise RuntimeError("Turn-PPO value state must be the first generated token of its action")
+        if len(boundary_positions) > 1:
+            raise RuntimeError("each Turn-PPO action row may have at most one immediate reward")
+        subtask = int(row_subtasks[row].item())
+        if subtask < 0:
+            raise RuntimeError("Turn-PPO action row is missing its source subtask id")
+        chains[(str(index[row]), str(rollout_ids[row]), subtask)].append(
+            (
+                int(event_orders[row].item()),
+                row,
+                int(value_positions[0].item()),
+                int(boundary_positions[0].item()) if len(boundary_positions) else -1,
+            )
+        )
+
+    action_count = 0
+    rewarded_actions = 0
+    for key, chain in chains.items():
+        chain.sort(key=lambda item: item[0])
+        orders = [order for order, _row, _value_position, _reward_position in chain]
+        if len(orders) != len(set(orders)):
+            raise RuntimeError(f"Turn-PPO duplicate action order in trajectory chain {key}")
+        action_count += len(chain)
+
+        next_advantage = 0.0
+        next_value = 0.0
+        for _order, row, value_position, reward_position in reversed(chain):
+            value = float(values[row, value_position].detach().item())
+            if not np.isfinite(value):
+                raise RuntimeError("Turn-PPO critic produced a non-finite value")
+            reward = 0.0
+            if reward_position >= 0:
+                reward = float(turn_rewards[row, reward_position].item())
+                if not np.isfinite(reward):
+                    raise RuntimeError("Turn-PPO encountered a non-finite terminal reward")
+                rewarded_actions += 1
+            delta = reward + float(gamma) * next_value - value
+            action_advantage = delta + float(gamma) * float(lam) * next_advantage
+            action_return = action_advantage + value
+
+            valid = response_mask[row].to(torch.bool)
+            advantages[row, valid] = action_advantage
+            returns[row, value_position] = action_return
+            next_advantage = action_advantage
+            next_value = value
+
+    # Whiten per macro action, not per generated token.  Broadcasting happens
+    # only after normalization so long ``<think>`` spans cannot change the
+    # relative scale of two action advantages.
+    action_advantages = []
+    for chain in chains.values():
+        for _order, row, value_position, _reward_position in chain:
+            action_advantages.append(advantages[row, value_position])
+    if action_advantages:
+        stacked = torch.stack(action_advantages)
+        mean = stacked.mean()
+        std = stacked.std(unbiased=False)
+        normalized = (stacked - mean) / (std + 1e-8)
+        cursor = 0
+        for chain in chains.values():
+            for _order, row, _value_position, _reward_position in chain:
+                valid = response_mask[row].to(torch.bool)
+                advantages[row, valid] = normalized[cursor]
+                cursor += 1
+
+    metrics = {
+        "turn_ppo/actions": float(action_count),
+        "turn_ppo/rewarded_terminal_actions": float(rewarded_actions),
+        "turn_ppo/trajectory_chains": float(len(chains)),
+        "turn_ppo/value_supervision_states": float(turn_value_mask.sum().item()),
+    }
+    return advantages, returns, metrics
+
+
 def compute_simulated_user_sparse_grpo_advantage(
     *,
     component_values: dict[str, torch.Tensor],

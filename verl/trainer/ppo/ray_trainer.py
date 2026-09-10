@@ -20,6 +20,8 @@ This trainer supports model-agonistic model initialization with huggingface
 
 import json
 import os
+import subprocess
+import sys
 import uuid
 import glob
 from collections import defaultdict
@@ -46,7 +48,10 @@ from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, Ra
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import agg_loss
-from verl.trainer.ppo.simulated_user_algos import compute_simulated_user_sparse_grpo_advantage
+from verl.trainer.ppo.simulated_user_algos import (
+    compute_simulated_user_sparse_grpo_advantage,
+    compute_simulated_user_turn_gae_advantage,
+)
 from verl.trainer.ppo.simulated_user_validation import validate_simulated_user
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
@@ -63,7 +68,6 @@ from verl.utils.reward_score.ground_truth import (
     select_static_chatr1_answer_ground_truth_with_passage_ids,
     select_static_convagent_answer_ground_truth_with_passage_ids,
 )
-from verl.utils.reward_score.static_convagent import monitor_plateau_reached
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
@@ -418,6 +422,7 @@ def compute_advantage(
     info_gain_weight=1.0,
     action_reward_weight=1.0,
     simulated_user_enabled=False,
+    simulated_user_turn_ppo=False,
     simulated_user_component_weights=None,
     simulated_user_metrics=None,
 ):
@@ -427,13 +432,46 @@ def compute_advantage(
     # prepare response group
     # TODO: add other ways to estimate advantages
     if adv_estimator == AdvantageEstimator.GAE:
-        advantages, returns = core_algos.compute_gae_advantage_return(
-            token_level_rewards=data.batch["token_level_rewards"],
-            values=data.batch["values"],
-            response_mask=data.batch["response_mask"],
-            gamma=gamma,
-            lam=lam,
-        )
+        if simulated_user_turn_ppo:
+            required_batch_keys = {
+                "sim_user_turn_ppo_reward_values",
+                "sim_user_turn_ppo_reward_mask",
+                "sim_user_turn_ppo_value_mask",
+                "sim_user_event_order",
+                "sim_user_row_subtask",
+                "values",
+            }
+            missing = sorted(required_batch_keys.difference(data.batch.keys()))
+            if missing:
+                raise RuntimeError(
+                    "simulated-user Turn-PPO rollout is missing required metadata: "
+                    + ", ".join(missing)
+                )
+            if "uidr" not in data.non_tensor_batch:
+                raise RuntimeError("simulated-user Turn-PPO rollout is missing uidr metadata")
+            advantages, returns, turn_ppo_metrics = compute_simulated_user_turn_gae_advantage(
+                turn_rewards=data.batch["sim_user_turn_ppo_reward_values"],
+                turn_reward_mask=data.batch["sim_user_turn_ppo_reward_mask"],
+                turn_value_mask=data.batch["sim_user_turn_ppo_value_mask"],
+                values=data.batch["values"],
+                response_mask=data.batch["response_mask"],
+                index=data.non_tensor_batch["uid"],
+                rollout_ids=data.non_tensor_batch["uidr"],
+                row_subtasks=data.batch["sim_user_row_subtask"],
+                event_orders=data.batch["sim_user_event_order"],
+                gamma=gamma,
+                lam=lam,
+            )
+            if simulated_user_metrics is not None:
+                simulated_user_metrics.update(turn_ppo_metrics)
+        else:
+            advantages, returns = core_algos.compute_gae_advantage_return(
+                token_level_rewards=data.batch["token_level_rewards"],
+                values=data.batch["values"],
+                response_mask=data.batch["response_mask"],
+                gamma=gamma,
+                lam=lam,
+            )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
     elif adv_estimator == AdvantageEstimator.GRPO:
@@ -450,6 +488,7 @@ def compute_advantage(
                 "answer_f1",
                 "evidence_utility",
                 "search_efficiency",
+                "uci",
                 "clarity",
                 "patience",
                 "format",
@@ -666,11 +705,15 @@ class RayPPOTrainer:
             ),
             max_response_length=self.config.data.max_response_length,
             static_convagent_mode=bool(self.config.algorithm.get("static_convagent_mode", False)),
+            static_react_mode=bool(self.config.algorithm.get("static_react_mode", False)),
             static_convagent_direct_evidence_reward=bool(
                 self.config.algorithm.get("static_convagent_direct_evidence_reward", False)
             ),
             static_convagent_short_answer_tokens=int(
                 self.config.algorithm.get("static_convagent_short_answer_tokens", 4)
+            ),
+            static_convagent_paper_reward=bool(
+                self.config.algorithm.get("static_convagent_paper_reward", False)
             ),
             static_chatr1_mode=bool(self.config.algorithm.get("static_chatr1_mode", False)),
             static_chatr1_intent_reward=bool(
@@ -683,23 +726,45 @@ class RayPPOTrainer:
             allow_clarify=bool(self.config.algorithm.get("simulated_user_allow_clarify", True)),
             allow_nonanswer=bool(self.config.algorithm.get("allow_nonanswer_action", True)),
             reward_mode=str(self.config.algorithm.get("simulated_user_reward_mode", "full")),
+            turn_ppo=bool(self.config.algorithm.get("simulated_user_turn_ppo", False)),
+            turn_ppo_action_correct_reward=float(
+                self.config.algorithm.get("simulated_user_turn_ppo_action_correct_reward", 0.0)
+            ),
+            turn_ppo_action_incorrect_reward=float(
+                self.config.algorithm.get("simulated_user_turn_ppo_action_incorrect_reward", -1.0)
+            ),
+            turn_ppo_nonanswer_correct_reward=float(
+                self.config.algorithm.get("simulated_user_turn_ppo_nonanswer_correct_reward", 0.2)
+            ),
+            turn_ppo_format_valid_reward=float(
+                self.config.algorithm.get("simulated_user_turn_ppo_format_valid_reward", 0.0)
+            ),
+            turn_ppo_format_invalid_reward=float(
+                self.config.algorithm.get("simulated_user_turn_ppo_format_invalid_reward", -1.0)
+            ),
+            turn_ppo_answer_f1_weight=float(
+                self.config.algorithm.get("simulated_user_turn_ppo_answer_f1_weight", 1.0)
+            ),
+            turn_ppo_clarify_f1_weight=float(
+                self.config.algorithm.get("simulated_user_turn_ppo_clarify_f1_weight", 1.0)
+            ),
             enable_evidence_utility=bool(
-                self.config.algorithm.get("simulated_user_enable_evidence_utility", False)
+                self.config.algorithm.get("simulated_user_enable_evidence_utility", True)
             ),
             enable_search_efficiency=bool(
-                self.config.algorithm.get("simulated_user_enable_search_efficiency", False)
+                self.config.algorithm.get("simulated_user_enable_search_efficiency", True)
             ),
             enable_user_feedback=bool(
                 self.config.algorithm.get("simulated_user_enable_feedback", True)
             ),
-            # The assessment-only path is intentionally validation-only.  It
-            # reports satisfaction for the no-feedback ablation without
-            # letting a simulator call alter training trajectories, rewards,
-            # or the policy-visible dialogue.
-            assess_user_satisfaction=bool(is_validation)
-            and bool(
-                self.config.algorithm.get("simulated_user_assess_satisfaction", False)
-            ),
+            # This flag is deliberately validation-only. Training must not
+            # spend simulator calls on a metric which provides no reward or
+            # trajectory feedback.
+            passive_satisfaction_evaluation=bool(
+                self.config.algorithm.get(
+                    "simulated_user_passive_satisfaction_evaluation", False
+                )
+            ) and bool(is_validation),
             use_static_gold_context=bool(
                 self.config.algorithm.get("simulated_user_static_gold_context", False)
             ),
@@ -850,7 +915,12 @@ class RayPPOTrainer:
         # check multi_turn with tool config
         if config.actor_rollout_ref.rollout.multi_turn.enable:
             assert config.actor_rollout_ref.rollout.multi_turn.tool_config_path is not None, "tool_config_path must be set when enabling multi_turn with tool, due to no role-playing support"
-            assert config.algorithm.adv_estimator in [AdvantageEstimator.GRPO], "only GRPO is tested for multi-turn with tool"
+            paper_chatr1_ppo = bool(config.algorithm.get("static_chatr1_paper_reward", False)) and (
+                config.algorithm.adv_estimator == AdvantageEstimator.GAE
+            )
+            assert config.algorithm.adv_estimator in [AdvantageEstimator.GRPO] or paper_chatr1_ppo, (
+                "multi-turn tools require GRPO, except the paper-faithful Static ChatR1 PPO/GAE mode"
+            )
 
         print("[validate_config] All configuration checks passed successfully!")
 
@@ -1231,11 +1301,15 @@ class RayPPOTrainer:
             ),
             max_response_length=self.config.data.max_response_length,
             static_convagent_mode=bool(self.config.algorithm.get("static_convagent_mode", False)),
+            static_react_mode=bool(self.config.algorithm.get("static_react_mode", False)),
             static_convagent_direct_evidence_reward=bool(
                 self.config.algorithm.get("static_convagent_direct_evidence_reward", False)
             ),
             static_convagent_short_answer_tokens=int(
                 self.config.algorithm.get("static_convagent_short_answer_tokens", 4)
+            ),
+            static_convagent_paper_reward=bool(
+                self.config.algorithm.get("static_convagent_paper_reward", False)
             ),
             static_chatr1_mode=bool(self.config.algorithm.get("static_chatr1_mode", False)),
             static_chatr1_intent_reward=bool(
@@ -1376,6 +1450,9 @@ class RayPPOTrainer:
                         if static_convagent_mode and static_chatr1_mode:
                             raise ValueError("static ConvAgent and ChatR1 modes are mutually exclusive")
                         answer_selector = (
+                            # The policy always emits one answer.  ChatR1
+                            # preserves its released answer alternatives so
+                            # the shared evaluator can take max F1/BERTScore.
                             select_static_chatr1_answer_ground_truth_with_passage_ids
                             if static_chatr1_mode
                             else (
@@ -1388,23 +1465,12 @@ class RayPPOTrainer:
                             answer_selector(reward_model, data_source=data_source)
                             for reward_model, data_source in zip(batch_reward_models, batch_data_sources)
                         ]
-                        if static_chatr1_mode:
-                            # Query--rewrite intent reward needs the original
-                            # nested candidates, not only the display reference.
-                            batch_ground_truths = [
-                                {
-                                    "ground_truth": reward_model.get("ground_truth", reward_model)
-                                    if isinstance(reward_model, dict)
-                                    else reward_model,
-                                    "data_source": data_source,
-                                }
-                                for reward_model, data_source in zip(batch_reward_models, batch_data_sources)
-                            ]
-                        else:
-                            batch_ground_truths = [
-                                {"ground_truth": answer}
-                                for answer, _ in batch_answer_references
-                            ]
+                        batch_ground_truths = (
+                            [{"ground_truth": reward_model.get("ground_truth", "")}
+                             for reward_model in batch_reward_models]
+                            if static_chatr1_mode
+                            else [{"ground_truth": answer} for answer, _ in batch_answer_references]
+                        )
 
                         _, final_gen_batch_output, info_gain_rewards, first_retrieved_passages = generation_manager.run_llm_loop(
                             gen_batch=test_gen_batch,
@@ -1517,21 +1583,30 @@ class RayPPOTrainer:
             metric_dict[f'val/test_score/{data_source}'] = np.mean(rewards)
 
         # Action accuracy is only defined for converted action-labelled samples
-        # (InsCiT / TopiOCQA). Static ConvAgent labels may contain an allowed
-        # set of actions, whereas online data has one canonical action.
+        # (InSCIt / TopiOCQA). QReCC and CoRAL have expected_action=None.
         action_values_by_source: dict[str, list[float]] = defaultdict(list)
         if len(expected_actions) == len(data_sources):
             for data_source, expected_action, action_correct in zip(
                 data_sources, expected_actions, action_corrects
             ):
-                has_action_label = (
-                    isinstance(expected_action, (list, tuple, set))
-                    and len(expected_action) > 0
-                ) or expected_action in {"answer", "clarify", "nonanswer"}
-                if has_action_label and action_correct is not None:
+                if (
+                    (isinstance(expected_action, (list, tuple, set)) and expected_action)
+                    or expected_action in {"answer", "clarify", "nonanswer"}
+                ) and action_correct is not None:
                     action_values_by_source[str(data_source)].append(float(bool(action_correct)))
         for data_source, values in action_values_by_source.items():
             metric_dict[f"val/test_score/{data_source}_action_accuracy"] = np.mean(values)
+
+        # ChatR1 has no action-accuracy objective, but every static baseline
+        # benefits from an explicit generation-health signal.  This is a
+        # reporting metric only: it is not added to the reward or the shared
+        # holdout early-stopping criterion.
+        format_values_by_source: dict[str, list[float]] = defaultdict(list)
+        if len(format_valids) == len(data_sources):
+            for data_source, format_valid in zip(data_sources, format_valids):
+                format_values_by_source[str(data_source)].append(float(bool(format_valid)))
+        for data_source, values in format_values_by_source.items():
+            metric_dict[f"val/test_score/{data_source}_format_success_rate"] = np.mean(values)
         # dump generations
         val_data_dir = self.config.trainer.get("validation_data_dir", None)
         if val_data_dir:
@@ -1675,6 +1750,114 @@ class RayPPOTrainer:
         with open(local_latest_checkpointed_iteration, "w") as f:
             f.write(str(self.global_steps))
 
+    def _compute_selection_composite_metrics(self, *, multi_reference: bool) -> dict[str, float]:
+        """Score the just-written holdout JSONL with the reportable evaluator.
+
+        The normal validation loop exposes lightweight reward metrics, but
+        checkpoint selection must use the same answer F1, BERTScore F1, and
+        NDCG@3 definitions that are reported after training.  In particular,
+        this preserves the shared max-over-released-references answer protocol
+        and TopiOCQA's passage-text NDCG rule.  BERTScore defaults to CPU here because the
+        actor/ref/critic workers are resident on the training GPUs.
+        """
+        validation_dir = self.config.trainer.get("validation_data_dir", None)
+        if not validation_dir:
+            raise ValueError(
+                "Composite checkpoint selection requires trainer.validation_data_dir "
+                "so every monitor validation can be scored exactly."
+            )
+
+        input_path = os.path.join(validation_dir, f"{self.global_steps}.jsonl")
+        if not os.path.isfile(input_path):
+            raise FileNotFoundError(
+                "Composite checkpoint selection expected the completed monitor "
+                f"validation JSONL at {input_path}, but it was not created."
+            )
+
+        output_dir = os.path.join(
+            validation_dir,
+            "selection_monitor_metrics",
+            f"global_step_{self.global_steps}",
+        )
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+        evaluator_path = os.path.join(project_root, "scripts", "compute_convagent_eval_metrics.py")
+        if not os.path.isfile(evaluator_path):
+            raise FileNotFoundError(f"Exact selection evaluator is missing: {evaluator_path}")
+
+        bertscore_model = str(
+            self.config.trainer.get("selection_monitor_bertscore_model", "roberta-large")
+        )
+        bertscore_batch_size = int(
+            self.config.trainer.get("selection_monitor_bertscore_batch_size", 8)
+        )
+        bertscore_device = str(
+            self.config.trainer.get("selection_monitor_bertscore_device", "cpu")
+        )
+        if bertscore_batch_size < 1:
+            raise ValueError("trainer.selection_monitor_bertscore_batch_size must be >= 1")
+
+        command = [
+            sys.executable,
+            evaluator_path,
+            "--input",
+            input_path,
+            "--output-dir",
+            output_dir,
+            "--bert-score-model",
+            bertscore_model,
+            "--bert-score-batch-size",
+            str(bertscore_batch_size),
+            "--bert-score-device",
+            bertscore_device,
+        ]
+        if multi_reference:
+            command.append("--multi-reference")
+
+        print(
+            "[CheckpointSelection] computing exact F1/BERTScore/NDCG@3 "
+            f"for global_step={self.global_steps} (BERTScore device={bertscore_device})",
+            flush=True,
+        )
+        subprocess.run(command, check=True)
+
+        summary_path = os.path.join(output_dir, "metrics_summary.json")
+        if not os.path.isfile(summary_path):
+            raise FileNotFoundError(
+                f"Exact selection evaluator completed without its summary: {summary_path}"
+            )
+        with open(summary_path, encoding="utf-8") as handle:
+            exact_metrics = json.load(handle).get("metrics", {})
+
+        required_names = ("f1", "bertscore_f1", "ndcg_at_3")
+        raw_scores: dict[str, float] = {}
+        for name in required_names:
+            if name not in exact_metrics:
+                raise RuntimeError(
+                    "Exact selection evaluator omitted required metric "
+                    f"{name}; received {sorted(exact_metrics)}"
+                )
+            value = float(exact_metrics[name])
+            if not np.isfinite(value):
+                raise RuntimeError(f"Exact selection metric {name} is non-finite: {value}")
+            raw_scores[name] = value
+
+        # These benchmark metrics are ratios. Clipping makes the normalisation
+        # explicit and robust to a future evaluator returning a tiny numerical
+        # overshoot, without changing valid [0, 1] scores.
+        normalised_scores = {
+            name: float(np.clip(value, 0.0, 1.0)) for name, value in raw_scores.items()
+        }
+        composite_score = float(np.mean(list(normalised_scores.values())))
+        return {
+            "val/selection/f1": raw_scores["f1"],
+            "val/selection/bertscore_f1": raw_scores["bertscore_f1"],
+            "val/selection/ndcg_at_3": raw_scores["ndcg_at_3"],
+            "val/selection/f1_normalized": normalised_scores["f1"],
+            "val/selection/bertscore_f1_normalized": normalised_scores["bertscore_f1"],
+            "val/selection/ndcg_at_3_normalized": normalised_scores["ndcg_at_3"],
+            "val/selection/composite_score": composite_score,
+        }
+
     def _load_checkpoint(self) -> bool:
         if self.config.trainer.resume_mode == "disable":
             return False
@@ -1711,6 +1894,29 @@ class RayPPOTrainer:
 
         actor_path = os.path.join(global_step_folder, "actor")
         critic_path = os.path.join(global_step_folder, "critic")
+        model_only_resume = bool(self.config.trainer.get("resume_model_only", False))
+        if model_only_resume:
+            if self.use_critic:
+                raise ValueError(
+                    "trainer.resume_model_only is only for actor-only export and "
+                    "cannot restore a critic or resume PPO training."
+                )
+            if not self.config.trainer.get("export_actor_hf_path", None):
+                raise ValueError(
+                    "trainer.resume_model_only is only supported together with "
+                    "trainer.export_actor_hf_path."
+                )
+            print(
+                "Model-only checkpoint recovery: loading actor FSDP shards only; "
+                "optimizer, RNG, and dataloader state will not be restored."
+            )
+            self.actor_rollout_wg.load_checkpoint(
+                actor_path,
+                del_local_after_load=False,
+                model_only=True,
+            )
+            return True
+
         # load actor
         self.actor_rollout_wg.load_checkpoint(actor_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load)
         # load critic
@@ -1788,18 +1994,20 @@ class RayPPOTrainer:
         # load checkpoint before doing anything
         loaded_checkpoint = self._load_checkpoint()
 
-        # A full FSDP PPO checkpoint is needed to reconstruct the actor state,
-        # but optimizer/RNG/critic shards are unnecessary for inference-only
-        # reuse.  Export immediately after loading, before any rollout or
-        # validation can change the policy.
+        # A full FSDP PPO checkpoint is required to reconstruct the actor
+        # state, but exported validation policies do not need optimizer,
+        # critic, or RNG shards. Export before any rollout can change it.
         actor_export_path = self.config.trainer.get("export_actor_hf_path", None)
         if actor_export_path:
             if not loaded_checkpoint:
                 raise ValueError(
                     "trainer.export_actor_hf_path requires trainer.resume_mode=resume_path "
-                    "and a valid full global_step_* checkpoint."
+                    "and a valid global_step_* checkpoint (or model-only recovery "
+                    "with complete actor shards)."
                 )
-            actor_export_max_shard_size = self.config.trainer.get("export_actor_hf_max_shard_size", "2GB")
+            actor_export_max_shard_size = self.config.trainer.get(
+                "export_actor_hf_max_shard_size", "2GB"
+            )
             self.actor_rollout_wg.export_actor_hf(
                 actor_export_path,
                 max_shard_size=actor_export_max_shard_size,
@@ -1832,6 +2040,9 @@ class RayPPOTrainer:
         last_val_metrics = None
         
         simulated_user_enabled = self._simulated_user_enabled()
+        simulated_user_turn_ppo = simulated_user_enabled and bool(
+            self.config.algorithm.get("simulated_user_turn_ppo", False)
+        )
         if simulated_user_enabled:
             if not self.config.do_search:
                 raise ValueError("simulated-user sparse GRPO requires do_search=true")
@@ -1843,7 +2054,24 @@ class RayPPOTrainer:
                 n=self.config.agent_grpo.n,
                 is_validation=False,
             )
-            print("[SimUser] enabled: legacy retrieval-IG rewards are disabled for this run", flush=True)
+            if simulated_user_turn_ppo:
+                if self.config.algorithm.adv_estimator != AdvantageEstimator.GAE:
+                    raise ValueError("simulated-user Turn-PPO requires algorithm.adv_estimator=gae")
+                if int(self.config.agent_grpo.n) != 1:
+                    raise ValueError(
+                        "simulated-user Turn-PPO requires agent_grpo.n=1; it does not sample GRPO siblings"
+                    )
+                if self.config.critic.strategy != "fsdp":
+                    raise ValueError("simulated-user Turn-PPO currently requires critic.strategy=fsdp")
+                print(
+                    "[TurnPPO] enabled: one action row per macro step; legacy retrieval-IG, "
+                    "satisfaction, and patience rewards are disabled",
+                    flush=True,
+                )
+            else:
+                if self.config.algorithm.adv_estimator != AdvantageEstimator.GRPO:
+                    raise ValueError("simulated-user sparse GRPO requires algorithm.adv_estimator=grpo")
+                print("[SimUser] enabled: legacy retrieval-IG rewards are disabled for this run", flush=True)
         else:
             generation_manager = LLMGenerationManager(
                 tokenizer=self.tokenizer,
@@ -1859,33 +2087,54 @@ class RayPPOTrainer:
             raise ValueError("static ConvAgent and ChatR1 modes are mutually exclusive")
         static_baseline_mode = static_convagent_mode or static_chatr1_mode
         static_baseline_name = "StaticChatR1" if static_chatr1_mode else "StaticConvAgent"
+        if static_baseline_mode and simulated_user_enabled:
+            raise ValueError("static baselines cannot be combined with simulated-user rollouts")
         static_monitor_enabled = static_baseline_mode and bool(
             self.config.trainer.get("static_convagent_monitor_enabled", True)
         )
-        if static_monitor_enabled and simulated_user_enabled:
-            raise ValueError("static-baseline monitoring cannot be combined with simulated-user rollouts")
+        turn_ppo_monitor_enabled = simulated_user_turn_ppo and bool(
+            self.config.trainer.get("simulated_user_turn_ppo_monitor_enabled", False)
+        )
+        selection_monitor_mode = static_baseline_mode or simulated_user_turn_ppo
+        selection_monitor_enabled = static_monitor_enabled or turn_ppo_monitor_enabled
+        selection_monitor_name = "TurnPPO" if simulated_user_turn_ppo else static_baseline_name
+        selection_monitor_log_prefix = "turn_ppo" if simulated_user_turn_ppo else "static_convagent"
+        if selection_monitor_mode and not selection_monitor_enabled:
+            raise ValueError(
+                "The final-checkpoint selection mode requires its holdout monitor. "
+                "Set trainer.simulated_user_turn_ppo_monitor_enabled=true for Turn-PPO."
+            )
         static_monitor_frequency = int(
             self.config.trainer.get("static_convagent_monitor_frequency", 5)
         )
         static_monitor_patience = int(
             self.config.trainer.get("static_convagent_monitor_patience", 3)
         )
-        static_monitor_min_delta = float(
-            self.config.trainer.get("static_convagent_monitor_min_delta", 0.002)
-        )
-        static_monitor_stability_window = int(
-            self.config.trainer.get("static_convagent_monitor_stability_window", 3)
-        )
-        static_monitor_stability_tolerance = float(
-            self.config.trainer.get("static_convagent_monitor_stability_tolerance", 0.005)
-        )
         static_monitor_metric = str(
             self.config.trainer.get("static_convagent_monitor_metric", "")
         ).strip()
-        if static_monitor_enabled and static_monitor_frequency < 1:
-            raise ValueError("trainer.static_convagent_monitor_frequency must be >= 1")
+        selection_composite_enabled = bool(
+            self.config.trainer.get("selection_monitor_composite_enabled", True)
+        )
+        if selection_monitor_enabled and (
+            static_monitor_frequency < 1 or static_monitor_patience < 1
+        ):
+            raise ValueError(
+                "trainer.static_convagent_monitor_frequency and "
+                "trainer.static_convagent_monitor_patience must both be >= 1"
+            )
+        if selection_monitor_enabled and not selection_composite_enabled:
+            raise ValueError(
+                "The static-baseline and Turn-PPO selection protocols require "
+                "trainer.selection_monitor_composite_enabled=true."
+            )
         static_monitor_history: list[dict[str, float]] = []
         static_stop_reason: Optional[str] = None
+        selection_best_score = float("-inf")
+        selection_best_global_step: Optional[int] = None
+        selection_best_completed_step: Optional[int] = None
+        selection_best_checkpoint: Optional[str] = None
+        selection_checks_without_improvement = 0
         offset = 0
         for epoch in range(self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
@@ -2029,10 +2278,13 @@ class RayPPOTrainer:
                             for key in (
                                 "loss_mask",
                                 "sim_user_turn_boundary_mask",
+                                "sim_user_turn_ppo_reward_mask",
+                                "sim_user_turn_ppo_value_mask",
                                 "sim_user_action_mask",
                                 "sim_user_answer_f1_mask",
                                 "sim_user_evidence_utility_mask",
                                 "sim_user_search_efficiency_mask",
+                                "sim_user_uci_mask",
                                 "sim_user_clarity_mask",
                                 "sim_user_patience_mask",
                                 "sim_user_format_mask",
@@ -2050,9 +2302,11 @@ class RayPPOTrainer:
                                     batch.batch[key][padding_rows].fill_(-1)
                             for key in (
                                 "sim_user_action_values",
+                                "sim_user_turn_ppo_reward_values",
                                 "sim_user_answer_f1_values",
                                 "sim_user_evidence_utility_values",
                                 "sim_user_search_efficiency_values",
+                                "sim_user_uci_values",
                                 "sim_user_clarity_values",
                                 "sim_user_patience_values",
                                 "sim_user_format_values",
@@ -2111,6 +2365,10 @@ class RayPPOTrainer:
                                 metrics["sim_user/answer_f1_reward_std"] = float(
                                     np.std(answer_f1_values)
                                 )
+                            uci_values = [event["uci"] for event in sim_events if event.get("uci") is not None]
+                            if uci_values:
+                                metrics["sim_user/uci_mean"] = float(np.mean(uci_values))
+                                metrics["sim_user/uci_std"] = float(np.std(uci_values))
                             evidence_utility_values = [
                                 event["evidence_utility"]
                                 for event in sim_events
@@ -2280,6 +2538,7 @@ class RayPPOTrainer:
                                 "answer_f1",
                                 "evidence_utility",
                                 "search_efficiency",
+                                "uci",
                                 "clarity",
                                 "patience",
                                 "format",
@@ -2324,10 +2583,7 @@ class RayPPOTrainer:
                             rewrite_bound_rewards=batch.non_tensor_batch.get("rewrite_bound_rewards"),
                             action_rewards=batch.non_tensor_batch.get("action_rewards"),
                             info_gain_weight=float(
-                                self.config.algorithm.get(
-                                    "static_chatr1_intent_weight",
-                                    1.0,
-                                )
+                                self.config.algorithm.get("static_chatr1_intent_weight", 1.0)
                                 if static_chatr1_mode
                                 else self.config.algorithm.get("static_convagent_info_gain_weight", 1.0)
                             ),
@@ -2335,6 +2591,7 @@ class RayPPOTrainer:
                                 self.config.algorithm.get("static_convagent_action_weight", 1.0)
                             ),
                             simulated_user_enabled=simulated_user_enabled,
+                            simulated_user_turn_ppo=simulated_user_turn_ppo,
                             simulated_user_component_weights=simulated_user_component_weights,
                             simulated_user_metrics=simulated_user_metrics,
                         )
@@ -2392,62 +2649,142 @@ class RayPPOTrainer:
                         for metric_name, metric_value in sorted(query_group_metrics.items()):
                             print(f"{metric_name}: {metric_value}", flush=True)
 
-                    # The static ConvAgent-style baseline has no prescribed
-                    # final step.  It monitors a conversation-disjoint subset
-                    # of the static training data and ends only once that
-                    # metric has both plateaued and stabilized.  The configured
-                    # total steps remains a safety ceiling, not model selection.
-                    static_monitor_due = (
-                        static_monitor_enabled
-                        and (self.global_steps + 1) % static_monitor_frequency == 0
+                    # Static baselines and Turn-PPO use a dialogue-disjoint
+                    # monitor set. The safety ceiling is not a selected final
+                    # step: the reportable checkpoint is the highest exact
+                    # three-metric composite observed on that monitor.
+                    selection_monitor_due = (
+                        selection_monitor_enabled
+                        and (
+                            (self.global_steps + 1) % static_monitor_frequency == 0
+                            # A deliberately short smoke run may end before
+                            # its first nominal monitor interval.  It still
+                            # needs one exact candidate checkpoint.
+                            or (is_last_step and not static_monitor_history)
+                        )
                     )
-                    static_plateau_reached = False
-                    if static_monitor_due:
+                    selection_plateau_reached = False
+                    selection_new_best = False
+                    if selection_monitor_due:
                         print(
-                            f"[{static_baseline_name}] monitor validation after completed "
+                            f"[{selection_monitor_name}] monitor validation after completed "
                             f"step {self.global_steps + 1}",
                             flush=True,
                         )
                         with _timer("testing", timing_raw):
                             static_val_metrics = self._validate()
+                        with _timer("selection_exact_metrics", timing_raw):
+                            selection_exact_metrics = self._compute_selection_composite_metrics(
+                                multi_reference=(static_baseline_mode or simulated_user_turn_ppo)
+                            )
+                        static_val_metrics.update(selection_exact_metrics)
                         metrics.update(static_val_metrics)
+                        # Print the reportable composite components and the
+                        # generation-health signals every time.  The raw and
+                        # normalized values are separately logged even though
+                        # these ratio metrics are normally identical.
+                        diagnostic_metrics = {
+                            name: float(value)
+                            for name, value in sorted(static_val_metrics.items())
+                            if any(
+                                token in name
+                                for token in (
+                                    "_f1",
+                                    "_em",
+                                    "action_accuracy",
+                                    "format_success_rate",
+                                    "ndcg_at_3",
+                                    "level_1_rate",
+                                    "simulator_fallback_rate",
+                                    "mean_retry_depth",
+                                    "mean_tool_calls",
+                                    "subtasks",
+                                    "validation_truncated",
+                                    "val/selection/",
+                                )
+                            )
+                        }
+                        print(
+                            f"[{selection_monitor_name}] monitor diagnostics after completed "
+                            f"step {self.global_steps + 1}: {diagnostic_metrics}",
+                            flush=True,
+                        )
                         if not static_monitor_metric:
-                            available = sorted(static_val_metrics)
                             raise ValueError(
                                 "Set trainer.static_convagent_monitor_metric; "
-                                f"available metrics: {available}"
+                                f"available metrics: {sorted(static_val_metrics)}"
                             )
                         if static_monitor_metric not in static_val_metrics:
                             raise ValueError(
-                                "Static ConvAgent monitor metric is missing: "
+                                "Final-checkpoint monitor metric is missing: "
                                 f"{static_monitor_metric}; available={sorted(static_val_metrics)}"
                             )
                         monitor_score = float(static_val_metrics[static_monitor_metric])
                         if not np.isfinite(monitor_score):
                             raise RuntimeError(
-                                f"{static_baseline_name} monitor metric is non-finite: {monitor_score}"
+                                f"{selection_monitor_name} monitor metric is non-finite: {monitor_score}"
                             )
+                        if monitor_score > selection_best_score:
+                            selection_new_best = True
+                            selection_best_score = monitor_score
+                            selection_best_global_step = self.global_steps
+                            selection_best_completed_step = self.global_steps + 1
+                            selection_checks_without_improvement = 0
+                        else:
+                            selection_checks_without_improvement += 1
                         static_monitor_history.append(
-                            {"completed_step": float(self.global_steps + 1), "score": monitor_score}
+                            {
+                                "completed_step": float(self.global_steps + 1),
+                                "global_step": float(self.global_steps),
+                                "score": monitor_score,
+                                "f1": float(selection_exact_metrics["val/selection/f1"]),
+                                "bertscore_f1": float(
+                                    selection_exact_metrics["val/selection/bertscore_f1"]
+                                ),
+                                "ndcg_at_3": float(selection_exact_metrics["val/selection/ndcg_at_3"]),
+                                "f1_normalized": float(
+                                    selection_exact_metrics["val/selection/f1_normalized"]
+                                ),
+                                "bertscore_f1_normalized": float(
+                                    selection_exact_metrics[
+                                        "val/selection/bertscore_f1_normalized"
+                                    ]
+                                ),
+                                "ndcg_at_3_normalized": float(
+                                    selection_exact_metrics[
+                                        "val/selection/ndcg_at_3_normalized"
+                                    ]
+                                ),
+                                "is_new_best": float(selection_new_best),
+                                "checks_without_improvement": float(
+                                    selection_checks_without_improvement
+                                ),
+                            }
                         )
-                        monitor_scores = [entry["score"] for entry in static_monitor_history]
-                        static_plateau_reached = monitor_plateau_reached(
-                            monitor_scores,
-                            patience=static_monitor_patience,
-                            min_delta=static_monitor_min_delta,
-                            stability_window=static_monitor_stability_window,
-                            stability_tolerance=static_monitor_stability_tolerance,
+                        monitor_checks = len(static_monitor_history)
+                        selection_plateau_reached = (
+                            selection_checks_without_improvement >= static_monitor_patience
                         )
-                        metrics["static_convagent/monitor_score"] = monitor_score
-                        metrics["static_convagent/monitor_checks"] = float(len(monitor_scores))
-                        metrics["static_convagent/monitor_plateau"] = float(static_plateau_reached)
+                        metrics[f"{selection_monitor_log_prefix}/monitor_score"] = monitor_score
+                        metrics[f"{selection_monitor_log_prefix}/monitor_checks"] = float(monitor_checks)
+                        metrics[
+                            f"{selection_monitor_log_prefix}/checks_without_improvement"
+                        ] = float(selection_checks_without_improvement)
+                        metrics[f"{selection_monitor_log_prefix}/best_monitor_score"] = float(
+                            selection_best_score
+                        )
+                        metrics[f"{selection_monitor_log_prefix}/new_best"] = float(selection_new_best)
+                        metrics[f"{selection_monitor_log_prefix}/monitor_plateau"] = float(
+                            selection_plateau_reached
+                        )
                         last_val_metrics = static_val_metrics
-                        if static_plateau_reached:
-                            static_stop_reason = "stable_holdout_plateau"
+                        if selection_plateau_reached:
+                            static_stop_reason = "three_non_improving_composite_checks"
                             print(
-                                f"[{static_baseline_name}] stopping on stable holdout plateau: "
-                                f"metric={static_monitor_metric}, score={monitor_score:.6f}, "
-                                f"checks={len(monitor_scores)}",
+                                f"[{selection_monitor_name}] stopping after {static_monitor_patience} "
+                                "consecutive non-improving composite checks: "
+                                f"current={monitor_score:.6f}, best={selection_best_score:.6f}, "
+                                f"checks={monitor_checks}",
                                 flush=True,
                             )
 
@@ -2493,50 +2830,78 @@ class RayPPOTrainer:
                     if (
                         (self.val_reward_fn is not None or simulated_user_enabled)
                         and is_last_step
-                        and not static_monitor_due
+                        and not selection_monitor_due
                     ):
                         with _timer("testing", timing_raw):
                             val_metrics: dict = self._validate()
                             last_val_metrics = val_metrics
                         metrics.update(val_metrics)
 
-                    static_final_step = static_baseline_mode and (
-                        static_plateau_reached or is_last_step
+                    selection_final_step = selection_monitor_mode and (
+                        selection_plateau_reached or is_last_step
                     )
-                    if static_baseline_mode and is_last_step and static_stop_reason is None:
+                    if selection_monitor_mode and is_last_step and static_stop_reason is None:
                         static_stop_reason = "safety_step_ceiling"
 
                     should_save_checkpoint = (
-                        static_final_step
-                        if static_baseline_mode
+                        selection_new_best
+                        if selection_monitor_mode
                         else self.config.trainer.save_freq > 0
                         and (is_last_step or (self.global_steps + 1) % self.config.trainer.save_freq == 0)
                     )
                     if should_save_checkpoint:
                         with _timer("save_checkpoint", timing_raw):
                             self._save_checkpoint()
-                        if static_baseline_mode:
-                            selection_path = os.path.join(
+                        if selection_monitor_mode:
+                            selection_best_checkpoint = os.path.join(
                                 self.config.trainer.default_local_dir,
+                                f"global_step_{self.global_steps}",
+                            )
+
+                    if selection_final_step:
+                        if (
+                            selection_best_global_step is None
+                            or selection_best_completed_step is None
+                            or selection_best_checkpoint is None
+                        ):
+                            raise RuntimeError(
+                                "Selection ended without a saved best checkpoint. "
+                                "The monitor must run at least once before finalising."
+                            )
+                        selection_path = os.path.join(
+                            self.config.trainer.default_local_dir,
+                            "simulated_user_turn_ppo_selection.json"
+                            if simulated_user_turn_ppo
+                            else (
                                 "static_chatr1_selection.json"
                                 if static_chatr1_mode
-                                else "static_convagent_selection.json",
-                            )
-                            selection = {
-                                "selection_reason": static_stop_reason,
-                                "selected_global_step": self.global_steps,
-                                "selected_completed_step": self.global_steps + 1,
-                                "monitor_metric": static_monitor_metric,
-                                "monitor_history": static_monitor_history,
-                                "safety_step_ceiling": self.total_training_steps,
-                            }
-                            with open(selection_path, "w", encoding="utf-8") as selection_file:
-                                json.dump(selection, selection_file, indent=2)
-                            print(
-                                f"[{static_baseline_name}] final checkpoint selected: "
-                                f"{self.config.trainer.default_local_dir}/global_step_{self.global_steps}",
-                                flush=True,
-                            )
+                                else "static_convagent_selection.json"
+                            ),
+                        )
+                        selection = {
+                            "selection_method": "turn_ppo"
+                            if simulated_user_turn_ppo
+                            else ("static_chatr1" if static_chatr1_mode else "static_convagent"),
+                            "selection_reason": static_stop_reason,
+                            "selected_global_step": selection_best_global_step,
+                            "selected_completed_step": selection_best_completed_step,
+                            "selected_checkpoint": selection_best_checkpoint,
+                            "best_composite_score": selection_best_score,
+                            "monitor_metric": static_monitor_metric,
+                            "monitor_patience": static_monitor_patience,
+                            "monitor_history": static_monitor_history,
+                            "final_observed_global_step": self.global_steps,
+                            "final_observed_completed_step": self.global_steps + 1,
+                            "safety_step_ceiling": self.total_training_steps,
+                        }
+                        with open(selection_path, "w", encoding="utf-8") as selection_file:
+                            json.dump(selection, selection_file, indent=2)
+                        print(
+                            f"[{selection_monitor_name}] best checkpoint selected: "
+                            f"{selection_best_checkpoint} "
+                            f"(composite={selection_best_score:.6f})",
+                            flush=True,
+                        )
 
                 # training metrics
                 metrics.update(
@@ -2552,17 +2917,29 @@ class RayPPOTrainer:
                 n_gpus = self.resource_pool_manager.get_n_gpus()
                 metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
                 
-                # Persist/log metrics together with checkpoints, plus the final
-                # validation metrics.  This is deliberately independent of
-                # ``test_freq`` because validation is final-step-only above.
-                if is_last_step or static_final_step or should_save_checkpoint:
+                # Send every update to W&B when enabled so its standard veRL
+                # panels include actor reward/entropy/KL and critic value-loss
+                # curves, rather than only sparse checkpoint events.  Keep the
+                # console and local metric JSON cadence compact.
+                if "wandb" in list(self.config.trainer.logger):
+                    logger.log(data=metrics, step=self.global_steps, backend=["wandb"])
+
+                # Persist/log complete metrics at every selection validation,
+                # checkpoint, or final step.  This is deliberately independent
+                # of ``test_freq`` because monitor validation is explicit.
+                if (
+                    is_last_step
+                    or selection_monitor_due
+                    or selection_final_step
+                    or should_save_checkpoint
+                ):
                     val_data_dir = self.config.trainer.get("validation_data_dir", None)
                     if val_data_dir:
                         with open(f'{val_data_dir}/metric_step_{self.global_steps}.json', 'w') as f:
                             json.dump(metrics, f)
                     logger.log(data=metrics, step=self.global_steps)
 
-                if is_last_step or static_final_step:
+                if is_last_step or selection_final_step:
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
                     return
