@@ -68,7 +68,7 @@ hf download Qwen/Qwen2.5-32B-Instruct \
 The 3B and 7B models initialize the corresponding policy (and, where used,
 the separately initialized critic). The 32B model is required only for the
 frozen TurnPPO user simulator. Before a private-model download or an upload,
-authenticate with `hf auth login`; verify the active account with `hf whoami`.
+authenticate with `hf login`; verify the active account with `hf whoami`.
 
 ### Static ConvAgent and ChatR1 Parquets
 
@@ -181,7 +181,7 @@ baseline monitor split. If dynamic Parquets already exist, do not reconvert
 them unless the original raw dialogues changed.
 
 
-Start the dataset-matched retriever before a run. InsCiT example:
+Start the dataset-matched retriever before a **static baseline** run. InsCiT example:
 
 ~~~bash
 CUDA_VISIBLE_DEVICES=0,1 \
@@ -259,7 +259,23 @@ SIMULATOR_MAX_NUM_BATCHED_TOKENS=8192 \
 bash scripts/run_user_simulator_server.sh > logs/qwen32b_user_simulator.log 2>&1 &
 ~~~
 
-With InsCiT retriever and simulator ready:
+When the retriever and simulator must share GPUs 0 and 1, use this
+**TurnPPO-only replacement** for the retriever. It keeps the FAISS index in
+host RAM and uses GPU 0 only for the small E5 query encoder; do not leave the
+GPU-FAISS static-baseline retriever running on port 8002 at the same time.
+
+~~~bash
+CUDA_VISIBLE_DEVICES=0,1 \
+RETRIEVER_FAISS_GPU=false \
+RETRIEVER_INDEX_PATH=$PWD/collection/inscit/e5_Flat.index \
+RETRIEVER_CORPUS_PATH=$PWD/collection/inscit/inscit_index.jsonl \
+RETRIEVER_MODEL_PATH=intfloat/e5-base-v2 \
+INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
+bash scripts/run_local_retriever_server.sh \
+  > logs/inscit_turnppo_cpu_faiss_retriever.log 2>&1 &
+~~~
+
+With the CPU-FAISS InsCiT retriever and simulator ready:
 
 ~~~bash
 nohup env \
