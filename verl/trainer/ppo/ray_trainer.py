@@ -20,6 +20,8 @@ This trainer supports model-agonistic model initialization with huggingface
 
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import uuid
@@ -29,6 +31,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from pprint import pprint
 from typing import Dict, Iterator, Optional, Type
 
@@ -1750,6 +1753,52 @@ class RayPPOTrainer:
         with open(local_latest_checkpointed_iteration, "w") as f:
             f.write(str(self.global_steps))
 
+    @staticmethod
+    def _prune_nonbest_global_step_checkpoints(
+        checkpoint_root: str, selected_checkpoint: str
+    ) -> list[str]:
+        """Remove superseded complete checkpoints after a new best is durable.
+
+        Selection-mode training never resumes from intermediate candidates: its
+        only reportable model is the monitor-best checkpoint. Retaining every
+        FSDP actor/critic/optimizer snapshot can otherwise consume hundreds of
+        GB. The deletion scope is deliberately narrow: only direct, real
+        ``global_step_<integer>`` directories under the configured output root
+        can be removed, and symlinks are always left untouched.
+        """
+        root = Path(checkpoint_root).resolve()
+        selected = Path(selected_checkpoint).resolve()
+        if (
+            selected.parent != root
+            or re.fullmatch(r"global_step_\d+", selected.name) is None
+        ):
+            raise ValueError(
+                "Refusing checkpoint pruning: selected checkpoint must be a direct "
+                f"global_step_<integer> child of {root}, got {selected}."
+            )
+        if not selected.is_dir():
+            raise FileNotFoundError(
+                f"Refusing checkpoint pruning: selected checkpoint is missing: {selected}"
+            )
+
+        removed: list[str] = []
+        for candidate in root.iterdir():
+            if candidate.name == selected.name:
+                continue
+            if re.fullmatch(r"global_step_\d+", candidate.name) is None:
+                continue
+            if candidate.is_symlink():
+                print(
+                    f"[Checkpoint pruning] leaving symlink untouched: {candidate}",
+                    flush=True,
+                )
+                continue
+            if not candidate.is_dir():
+                continue
+            shutil.rmtree(candidate)
+            removed.append(str(candidate))
+        return removed
+
     def _compute_selection_composite_metrics(self, *, multi_reference: bool) -> dict[str, float]:
         """Score the just-written holdout JSONL with the reportable evaluator.
 
@@ -2099,6 +2148,9 @@ class RayPPOTrainer:
         selection_monitor_enabled = static_monitor_enabled or turn_ppo_monitor_enabled
         selection_monitor_name = "TurnPPO" if simulated_user_turn_ppo else static_baseline_name
         selection_monitor_log_prefix = "turn_ppo" if simulated_user_turn_ppo else "static_convagent"
+        keep_only_best_checkpoint = bool(
+            self.config.trainer.get("keep_only_best_checkpoint", True)
+        )
         if selection_monitor_mode and not selection_monitor_enabled:
             raise ValueError(
                 "The final-checkpoint selection mode requires its holdout monitor. "
@@ -2857,6 +2909,22 @@ class RayPPOTrainer:
                                 self.config.trainer.default_local_dir,
                                 f"global_step_{self.global_steps}",
                             )
+                            if keep_only_best_checkpoint:
+                                removed_checkpoints = self._prune_nonbest_global_step_checkpoints(
+                                    self.config.trainer.default_local_dir,
+                                    selection_best_checkpoint,
+                                )
+                                metrics[
+                                    "checkpoint_pruning/removed_global_step_count"
+                                ] = float(len(removed_checkpoints))
+                                if removed_checkpoints:
+                                    print(
+                                        "[Checkpoint pruning] kept selected best "
+                                        f"{selection_best_checkpoint}; removed "
+                                        f"{len(removed_checkpoints)} stale checkpoint(s): "
+                                        f"{removed_checkpoints}",
+                                        flush=True,
+                                    )
 
                     if selection_final_step:
                         if (

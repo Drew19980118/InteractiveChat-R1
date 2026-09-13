@@ -249,6 +249,7 @@ echo "[$PROJECT_NAME] protocol-matched: prompt=4096 response=500 model_len=8192 
 echo "[$PROJECT_NAME] dataset=$DATASET experiment=$EXPERIMENT_NAME train_batch=128 validation_batch=256 n=8"
 echo "[$PROJECT_NAME] validate every $MONITOR_FREQUENCY updates; exact composite=(normalized F1 + BERTScore-F1 + NDCG@3)/3; stop after $MONITOR_PATIENCE consecutive non-improvements"
 echo "[$PROJECT_NAME] selection BERTScore: model=$SELECTION_BERTSCORE_MODEL device=$SELECTION_BERTSCORE_DEVICE batch_size=$SELECTION_BERTSCORE_BATCH_SIZE"
+echo "[$PROJECT_NAME] checkpoint retention: after each durable new best, prune all older real global_step_* directories"
 
 python -u -m verl.trainer.main_ppo \
   "data.train_files=$TRAIN_FILE" \
@@ -311,6 +312,7 @@ python -u -m verl.trainer.main_ppo \
   "trainer.experiment_name=$EXPERIMENT_NAME" \
   "trainer.default_hdfs_dir=null" \
   "trainer.default_local_dir=$OUTPUT_DIR" \
+  "trainer.keep_only_best_checkpoint=true" \
   "trainer.rollout_data_dir=$ROLLOUT_DIR" \
   "trainer.validation_data_dir=$EVAL_DIR" \
   "trainer.val_before_train=false" \

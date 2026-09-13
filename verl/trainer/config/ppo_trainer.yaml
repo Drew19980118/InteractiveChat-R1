@@ -392,6 +392,9 @@ trainer:
   export_actor_hf_path: null
   export_actor_hf_max_shard_size: 2GB
   default_local_dir: ./outputs/${trainer.project_name}/${trainer.experiment_name}
+  # Selection-mode static baselines and Turn-PPO retain only the newly saved
+  # monitor-best global_step_* checkpoint. Set false only for debugging.
+  keep_only_best_checkpoint: true
   max_actor_ckpt_to_keep: null
   max_critic_ckpt_to_keep: null
   # The timeout for ray worker group to wait for the register center to be ready
