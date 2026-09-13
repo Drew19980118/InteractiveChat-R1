@@ -214,19 +214,49 @@ nohup env \
 
 ### QReCC train/test
 
-Restart the retriever with the QReCC index/corpus, then run:
+Restart the retriever with the QReCC index/corpus on GPUs **other than the
+two training GPUs**. For example, when the serial training suite uses GPUs 0
+and 1, place the GPU FAISS retriever on GPUs 2 and 3:
 
 ~~~bash
 nohup env \
-  CUDA_VISIBLE_DEVICES=2,3 N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
+  CUDA_VISIBLE_DEVICES=2,3 \
+  RETRIEVER_FAISS_GPU=true \
+  RETRIEVER_INDEX_PATH=$PWD/collection/qrecc/e5_Flat.index \
+  RETRIEVER_CORPUS_PATH=$PWD/collection/qrecc/qrecc_index.jsonl \
+  RETRIEVER_MODEL_PATH=intfloat/e5-base-v2 \
+  INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
+  bash scripts/run_local_retriever_server.sh \
+  > logs/qrecc_retriever.log 2>&1 &
+~~~
+
+Then run ConvAgent 3B -> ConvAgent 7B -> ChatR1 3B -> ChatR1 7B serially on
+GPUs 0 and 1:
+
+~~~bash
+nohup env \
+  CUDA_VISIBLE_DEVICES=0,1 N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
   MODEL_3B_PATH=$PWD/models/Qwen2.5-3B-Instruct \
   MODEL_7B_PATH=$PWD/models/Qwen2.5-7B-Instruct \
+  HOLDOUT_FRACTION=0.10 SPLIT_SEED=42 \
   INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
   WANDB_ENABLED=true WANDB_PROJECT=interactivechat-r1 \
-  WANDB_RUN_GROUP=latest_qrecc_baselines \
+  WANDB_RUN_GROUP=qrecc_baselines_latest_cuda01_v1 \
+  WANDB_LOG_VAL_GENERATIONS=0 \
   HF_UPLOAD_ACTOR_ONLY=true HF_UPLOAD_NUM_WORKERS=4 \
-  bash scripts/run_latest_qrecc_static_baselines_3b_7b_export_upload.sh \
-  > logs/latest_qrecc_static_baselines.log 2>&1 &
+  bash scripts/run_latest_qrecc_static_baselines_3b_7b_cuda01_export_upload.sh \
+  > logs/qrecc_baselines_3b_7b_cuda01_v1.log 2>&1 &
+~~~
+
+Each method validates every five updates and selects by the equal-weight
+max-reference composite `(F1 + BERTScore-F1 + NDCG@3) / 3`. Immediately after
+a newly selected best checkpoint is fully saved, the trainer removes its older
+real `global_step_*` siblings; therefore, only the current best full
+actor/critic/optimizer checkpoint is retained during training. This limits
+disk growth, but does not reduce GPU-memory usage. Confirm a cleanup with:
+
+~~~bash
+grep -F "[Checkpoint pruning]" logs/qrecc_baselines_3b_7b_cuda01_v1.log
 ~~~
 
 Default Hub names:
@@ -313,4 +343,3 @@ https://wandb.ai/<your-entity>/interactivechat-r1
 Useful panels include actor/pg_loss, actor/entropy_loss, actor/ppo_kl, critic/reward, critic/vf_loss, response length, terminal reward, and val/selection/*. W&B reports after a completed PPO update, so it can lag rollout progress.
 
 Actor-only export removes optimizer, trainer/FSDP state, reference, and critic while preserving the selected actor weights exactly. Inference/static-evaluation performance is unchanged. Full two-rank global_step checkpoints require two ranks; use the exported HF directory for one-GPU inference.
-
