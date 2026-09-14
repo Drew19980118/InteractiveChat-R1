@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
 # Start the frozen Qwen32B user simulator through an OpenAI-compatible vLLM API.
-# This is intentionally a separate process/GPU allocation from policy training.
+# The standard launcher allocation is CUDA devices 0 and 1.
 set -euo pipefail
 
 : "${SIMULATOR_MODEL_PATH:?Set SIMULATOR_MODEL_PATH to the downloaded Qwen32B model.}"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 SIMULATOR_PORT="${SIMULATOR_PORT:-8010}"
 SIMULATOR_GPU_MEMORY_UTILIZATION="${SIMULATOR_GPU_MEMORY_UTILIZATION:-0.85}"
-SIMULATOR_TP_SIZE="${SIMULATOR_TP_SIZE:-1}"
+SIMULATOR_TP_SIZE="${SIMULATOR_TP_SIZE:-2}"
 SIMULATOR_MAX_MODEL_LEN="${SIMULATOR_MAX_MODEL_LEN:-8192}"
 SIMULATOR_MAX_NUM_SEQS="${SIMULATOR_MAX_NUM_SEQS:-1}"
 SIMULATOR_MAX_NUM_BATCHED_TOKENS="${SIMULATOR_MAX_NUM_BATCHED_TOKENS:-8192}"
 
 # vLLM 0.6.3 pins outlines 0.0.46, whose eager optional airport import points
 # at a broken PyPI dependency. Prepend the project-local compatibility shim.
+export CUDA_VISIBLE_DEVICES
 export PYTHONPATH="${PROJECT_ROOT}/third_party${PYTHONPATH:+:${PYTHONPATH}}"
 
 exec python -m vllm.entrypoints.openai.api_server \

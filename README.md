@@ -124,9 +124,11 @@ test -f collection/qrecc/qrecc_index.jsonl
 test -f collection/qrecc/e5_Flat.index
 ~~~
 
-Use GPUs 0 and 1 for retrieval and GPUs 2 and 3 for policy training. This is
-the resource layout used by the static ConvAgent/ChatR1 suites (the simulator
-is not running for those static baselines):
+The current launcher convention uses CUDA devices 0 and 1 for retriever,
+user-simulator, and policy-training jobs. The launchers default to `0,1` when
+`CUDA_VISIBLE_DEVICES` is omitted. These are per-process assignments: if the
+services share one physical host, their memory usage is additive, so use CPU
+FAISS or isolate heavyweight services when the two cards lack enough headroom.
 
 ~~~bash
 CUDA_VISIBLE_DEVICES=0,1 \
@@ -143,12 +145,13 @@ With GPU FAISS enabled, expose at least two retrieval GPUs; the server shards
 the index over the visible GPUs. If the cards cannot accommodate the index,
 set `RETRIEVER_FAISS_GPU=false` and expect lower throughput.
 
-For **TurnPPO**, the Qwen-32B simulator also uses GPUs 0 and 1, while training
-stays on GPUs 2 and 3. Do not run GPU-FAISS retrieval and the 32B simulator on
-GPUs 0 and 1 at the same time: their memory footprints are additive. If only
-these four GPUs are available, start the retriever with
-`RETRIEVER_FAISS_GPU=false` (the query encoder still uses the visible GPUs)
-or reserve another GPU pair for GPU-FAISS retrieval.
+For **TurnPPO**, the Qwen-32B simulator and training launchers use the same
+CUDA `0,1` convention. Do not assume the simulator, GPU-FAISS retrieval, and
+training can coexist on one physical pair: their memory footprints are
+additive. When they share a host, start the retriever with
+`RETRIEVER_FAISS_GPU=false` (the query encoder still sees CUDA 0 and 1), and
+place the simulator behind the configured API endpoint if local memory is
+insufficient.
 
 ### Dynamic dialogue Parquets (required by TurnPPO only)
 
@@ -195,13 +198,13 @@ bash scripts/run_local_retriever_server.sh > logs/inscit_retriever.log 2>&1 &
 
 ## Latest static baseline suites
 
-Each suite is serial: **ConvAgent 3B → ConvAgent 7B → ChatR1 3B → ChatR1 7B**. For every stage it trains, source-test evaluates the selected checkpoint, exports only the selected actor, then uploads it if HF_UPLOAD_ACTOR_ONLY=true.
+The complete suites are serial: **ConvAgent 3B → ConvAgent 7B → ChatR1 3B → ChatR1 7B**. The QReCC ConvAgent-only launcher runs just **ConvAgent 3B → ConvAgent 7B**. For every enabled stage it trains, source-test evaluates the selected checkpoint, exports only the selected actor, then uploads it if `HF_UPLOAD_ACTOR_ONLY=true`.
 
 ### InsCiT train/test
 
 ~~~bash
 nohup env \
-  CUDA_VISIBLE_DEVICES=2,3 N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
+  CUDA_VISIBLE_DEVICES=0,1 N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
   MODEL_3B_PATH=$PWD/models/Qwen2.5-3B-Instruct \
   MODEL_7B_PATH=$PWD/models/Qwen2.5-7B-Instruct \
   INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
@@ -214,14 +217,14 @@ nohup env \
 
 ### QReCC train/test
 
-Restart the retriever with the QReCC index/corpus on GPUs **other than the
-two training GPUs**. For example, when the serial training suite uses GPUs 0
-and 1, place the GPU FAISS retriever on GPUs 2 and 3:
+Start the retriever with the QReCC index/corpus on CUDA 0 and 1. The example
+keeps the large FAISS index in host memory so it can share the CUDA numbering
+convention with the serial training job:
 
 ~~~bash
 nohup env \
-  CUDA_VISIBLE_DEVICES=2,3 \
-  RETRIEVER_FAISS_GPU=true \
+  CUDA_VISIBLE_DEVICES=0,1 \
+  RETRIEVER_FAISS_GPU=false \
   RETRIEVER_INDEX_PATH=$PWD/collection/qrecc/e5_Flat.index \
   RETRIEVER_CORPUS_PATH=$PWD/collection/qrecc/qrecc_index.jsonl \
   RETRIEVER_MODEL_PATH=intfloat/e5-base-v2 \
@@ -230,8 +233,7 @@ nohup env \
   > logs/qrecc_retriever.log 2>&1 &
 ~~~
 
-Then run ConvAgent 3B -> ConvAgent 7B -> ChatR1 3B -> ChatR1 7B serially on
-GPUs 0 and 1:
+Then run only ConvAgent 3B -> ConvAgent 7B serially on GPUs 0 and 1:
 
 ~~~bash
 nohup env \
@@ -241,12 +243,17 @@ nohup env \
   HOLDOUT_FRACTION=0.10 SPLIT_SEED=42 \
   INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
   WANDB_ENABLED=true WANDB_PROJECT=interactivechat-r1 \
-  WANDB_RUN_GROUP=qrecc_baselines_latest_cuda01_v1 \
+  WANDB_RUN_GROUP=qrecc_convagent_3b_7b_cuda01_v1 \
   WANDB_LOG_VAL_GENERATIONS=0 \
   HF_UPLOAD_ACTOR_ONLY=true HF_UPLOAD_NUM_WORKERS=4 \
-  bash scripts/run_latest_qrecc_static_baselines_3b_7b_cuda01_export_upload.sh \
-  > logs/qrecc_baselines_3b_7b_cuda01_v1.log 2>&1 &
+  bash scripts/run_latest_qrecc_convagent_3b_7b_cuda01_export_upload.sh \
+  > logs/qrecc_convagent_3b_7b_cuda01_v1.log 2>&1 &
 ~~~
+
+The launcher hard-disables both ChatR1 stages. Set
+`RUN_CONVAGENT_3B=false` to resume with only the 7B stage. The existing
+`run_latest_qrecc_static_baselines_3b_7b_cuda01_export_upload.sh` remains the
+four-stage ConvAgent + ChatR1 entrypoint when that full comparison is needed.
 
 Each method validates every five updates and selects by the equal-weight
 max-reference composite `(F1 + BERTScore-F1 + NDCG@3) / 3`. Immediately after
@@ -256,7 +263,7 @@ actor/critic/optimizer checkpoint is retained during training. This limits
 disk growth, but does not reduce GPU-memory usage. Confirm a cleanup with:
 
 ~~~bash
-grep -F "[Checkpoint pruning]" logs/qrecc_baselines_3b_7b_cuda01_v1.log
+grep -F "[Checkpoint pruning]" logs/qrecc_convagent_3b_7b_cuda01_v1.log
 ~~~
 
 Default Hub names:
@@ -276,7 +283,9 @@ DATASET=inscit bash scripts/run_latest_static_baselines_suite.sh
 
 ## TurnPPO InsCiT 3B
 
-Start the 32B simulator on GPUs 0 and 1; training remains on GPUs 2 and 3:
+Start the 32B simulator on GPUs 0 and 1. The training command below now uses
+the same CUDA 0 and 1 convention; run them together only when the physical
+allocation has enough memory, otherwise serve the simulator remotely:
 
 ~~~bash
 CUDA_VISIBLE_DEVICES=0,1 \
@@ -309,7 +318,7 @@ With the CPU-FAISS InsCiT retriever and simulator ready:
 
 ~~~bash
 nohup env \
-  CUDA_VISIBLE_DEVICES=2,3 N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
+  CUDA_VISIBLE_DEVICES=0,1 N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
   MODEL_PATH=$PWD/models/Qwen2.5-3B-Instruct \
   USER_SIMULATOR_BASE_URL=http://127.0.0.1:8010 \
   USER_SIMULATOR_MODEL=qwen32b-user-simulator \

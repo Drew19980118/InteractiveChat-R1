@@ -11,7 +11,7 @@ cd "$PROJECT_ROOT"
 : "${STATIC_BASELINE:?Set STATIC_BASELINE to convagent or chatr1.}"
 : "${DATASET:?Set DATASET to inscit or qrecc.}"
 : "${MODEL_PATH:?Set MODEL_PATH to a Qwen2.5 3B/7B Instruct directory.}"
-: "${CUDA_VISIBLE_DEVICES:?Set CUDA_VISIBLE_DEVICES.}"
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 
 case "$DATASET" in
   inscit|qrecc) ;;

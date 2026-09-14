@@ -10,7 +10,7 @@ cd "$PROJECT_ROOT"
 : "${MODEL_PATH:?Set MODEL_PATH to the local Qwen2.5-3B-Instruct directory.}"
 : "${USER_SIMULATOR_BASE_URL:?Example: http://127.0.0.1:8010}"
 : "${USER_SIMULATOR_MODEL:?Set the served Qwen32B user-simulator name.}"
-: "${CUDA_VISIBLE_DEVICES:?Set the two training GPUs.}"
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 
 INTERACTIVECHAT_CONDA_ENV="${INTERACTIVECHAT_CONDA_ENV:-${IGPO_CONDA_ENV:-interactivechat-r1}}"
 IGPO_CONDA_ENV="$INTERACTIVECHAT_CONDA_ENV"

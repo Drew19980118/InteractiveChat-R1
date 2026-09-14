@@ -18,7 +18,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_ROOT"
 
 : "${DATASET:?Set DATASET to inscit or qrecc.}"
-: "${CUDA_VISIBLE_DEVICES:?Set CUDA_VISIBLE_DEVICES to two idle GPUs.}"
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 
 case "$DATASET" in
   inscit|qrecc) ;;

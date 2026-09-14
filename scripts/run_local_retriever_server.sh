@@ -5,7 +5,7 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-: "${CUDA_VISIBLE_DEVICES:?Set the GPU(s) reserved for retrieval.}"
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 : "${RETRIEVER_INDEX_PATH:?Set the merged FAISS index path.}"
 : "${RETRIEVER_CORPUS_PATH:?Set the JSONL corpus path aligned to the FAISS ids.}"
 
@@ -21,6 +21,7 @@ case "$RETRIEVER_FAISS_GPU" in
 esac
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$INTERACTIVECHAT_CONDA_ENV"
+export CUDA_VISIBLE_DEVICES
 
 exec python -u scripts/local_retriever.py \
   --index_path "$RETRIEVER_INDEX_PATH" \
