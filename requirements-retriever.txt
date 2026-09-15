@@ -1,10 +1,9 @@
-# Dependencies for scripts/local_retriever.py, installed after the locked
-# training environment is available.  The training runtime (vLLM 0.6.3) is
-# incompatible with NumPy 2.x; pin NumPy here because recent faiss-gpu-cu12
-# releases otherwise upgrade it transitively.  Select another FAISS build only
-# if it is compatible with CUDA 12 and NumPy 1.26.
+# Non-FAISS dependencies for scripts/local_retriever.py, installed after the
+# locked training environment is available. The runtime (vLLM 0.6.3) is
+# incompatible with NumPy 2.x. FAISS is deliberately excluded: pip CPU/GPU
+# wheels can shadow the Conda GPU binding. Install it only through
+# scripts/install_gpu_faiss_cuda121.sh, as documented in README.md.
 numpy==1.26.4
-faiss-gpu-cu12==1.9.0.0
 fastapi
 uvicorn
 requests

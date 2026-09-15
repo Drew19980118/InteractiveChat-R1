@@ -30,6 +30,7 @@ Every method emits one answer. If a source sample has several acceptable answer 
 MAX_JOBS=8 bash scripts/install_h100_eval_env.sh interactivechat-r1
 conda activate interactivechat-r1
 python -m pip install -r requirements-eval-metrics.txt
+python -m pip install -r requirements-retriever.txt
 python -m pip install wandb       # optional, for dashboards
 wandb login                       # optional, once per server
 ~~~
@@ -124,11 +125,50 @@ test -f collection/qrecc/qrecc_index.jsonl
 test -f collection/qrecc/e5_Flat.index
 ~~~
 
-The current launcher convention uses CUDA devices 0 and 1 for retriever,
-user-simulator, and policy-training jobs. The launchers default to `0,1` when
-`CUDA_VISIBLE_DEVICES` is omitted. These are per-process assignments: if the
-services share one physical host, their memory usage is additive, so use CPU
-FAISS or isolate heavyweight services when the two cards lack enough headroom.
+#### GPU FAISS installation and verification
+
+The QReCC GPU index needs a **GPU-enabled** FAISS Python binding. A plain
+`faiss-cpu` wheel can load and serve the index on host memory, but it does not
+provide `GpuMultipleClonerOptions`; setting `RETRIEVER_FAISS_GPU=true` with
+that wheel will fail. The older Conda-forge CUDA 11.8 FAISS 1.8 build can also
+expose CPU-only bindings despite its package name. Use the following tested
+installation in the activated Python-3.10 `interactivechat-r1` environment.
+
+Run the supplied one-time installer. It removes only existing FAISS packages
+and pip wheels, then installs the known-good PyTorch-channel CUDA 12.1 FAISS
+binding. If Conda's displayed package plan proposes removing PyTorch, vLLM,
+FlashAttention, or the environment itself, cancel and resolve that conflict
+instead.
+
+~~~bash
+conda activate interactivechat-r1
+bash scripts/install_gpu_faiss_cuda121.sh
+~~~
+
+Verify the actual Python binding before starting the retriever. This must print
+`GPU API: True` and `Visible GPUs: 2`.
+
+~~~bash
+CUDA_VISIBLE_DEVICES=0,1 python - <<'PY'
+import faiss
+
+print("Faiss:", getattr(faiss, "__version__", "unknown"))
+print("GPU API:", hasattr(faiss, "GpuMultipleClonerOptions"))
+print("Visible GPUs:", faiss.get_num_gpus())
+assert hasattr(faiss, "GpuMultipleClonerOptions")
+assert faiss.get_num_gpus() == 2
+PY
+~~~
+
+The NVIDIA driver must support CUDA 12.1 or newer. `RETRIEVER_FAISS_GPU=false`
+is a supported CPU-index fallback after this installation; the E5 query encoder
+can still run on GPU, but QReCC throughput will be lower.
+
+The examples below use CUDA devices 0 and 1. These are per-process
+assignments: retriever, simulator, and training memory use is additive. For a
+GPU-resident QReCC index, use a separate pair of GPUs for 7B training when
+available; otherwise use CPU FAISS or ensure the two cards have sufficient
+headroom for both the index and the training workers.
 
 ~~~bash
 CUDA_VISIBLE_DEVICES=0,1 \
@@ -198,7 +238,7 @@ bash scripts/run_local_retriever_server.sh > logs/inscit_retriever.log 2>&1 &
 
 ## Latest static baseline suites
 
-The complete suites are serial: **ConvAgent 3B → ConvAgent 7B → ChatR1 3B → ChatR1 7B**. The QReCC ConvAgent-only launcher runs just **ConvAgent 3B → ConvAgent 7B**. For every enabled stage it trains, source-test evaluates the selected checkpoint, exports only the selected actor, then uploads it if `HF_UPLOAD_ACTOR_ONLY=true`.
+The complete suites are serial: **ConvAgent 3B → ConvAgent 7B → ChatR1 3B → ChatR1 7B**. The QReCC launchers also support **ConvAgent 3B → ConvAgent 7B**, and the 7B-only pair **ConvAgent 7B → ChatR1 7B**. For every enabled stage they train, source-test evaluate the selected checkpoint, export only the selected actor, then upload it if `HF_UPLOAD_ACTOR_ONLY=true`.
 
 ### InsCiT train/test
 
@@ -254,6 +294,32 @@ The launcher hard-disables both ChatR1 stages. Set
 `RUN_CONVAGENT_3B=false` to resume with only the 7B stage. The existing
 `run_latest_qrecc_static_baselines_3b_7b_cuda01_export_upload.sh` remains the
 four-stage ConvAgent + ChatR1 entrypoint when that full comparison is needed.
+
+#### QReCC 7B: ConvAgent then ChatR1
+
+This 7B-only launcher does not require the 3B model directory. It runs
+**ConvAgent 7B → ChatR1 7B** serially, with a separate 7B actor and critic for
+ChatR1:
+
+~~~bash
+nohup env \
+  CUDA_VISIBLE_DEVICES=0,1 N_GPUS=2 ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
+  MODEL_7B_PATH=$PWD/models/Qwen2.5-7B-Instruct \
+  HOLDOUT_FRACTION=0.10 SPLIT_SEED=42 \
+  INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
+  WANDB_ENABLED=true WANDB_PROJECT=interactivechat-r1 \
+  WANDB_RUN_GROUP=qrecc_convagent_chatr1_7b_cuda01_v1 \
+  WANDB_LOG_VAL_GENERATIONS=0 \
+  HF_UPLOAD_ACTOR_ONLY=true HF_UPLOAD_NUM_WORKERS=4 \
+  HF_CONVAGENT_7B_REPO_ID=DrewZhang/interactivechat-r1-static-convagent-qrecc-qwen25-7b \
+  HF_CHATR1_7B_REPO_ID=DrewZhang/interactivechat-r1-static-chatr1-qrecc-qwen25-7b \
+  bash scripts/run_latest_qrecc_convagent_chatr1_7b_cuda01_export_upload.sh \
+  > logs/qrecc_convagent_chatr1_7b_cuda01_v1.log 2>&1 &
+~~~
+
+For either QReCC GPU-FAISS launcher, first run the verification above, then
+start the GPU retriever with `RETRIEVER_FAISS_GPU=true`. Do not run the 7B
+training pair on the same two 80-GB cards as the GPU-sharded QReCC index.
 
 Each method validates every five updates and selects by the equal-weight
 max-reference composite `(F1 + BERTScore-F1 + NDCG@3) / 3`. Immediately after

@@ -122,6 +122,19 @@ class DenseRetriever:
         print(f"Loading FAISS index: {index_path}", flush=True)
         self.index = faiss.read_index(index_path)
         if use_gpu_index:
+            if not hasattr(faiss, "GpuMultipleClonerOptions"):
+                raise RuntimeError(
+                    "RETRIEVER_FAISS_GPU=true requires a GPU-enabled FAISS binding, "
+                    "but this Python environment exposes CPU-only FAISS. Activate "
+                    "interactivechat-r1 and run: bash scripts/install_gpu_faiss_cuda121.sh"
+                )
+            gpu_count = faiss.get_num_gpus()
+            if gpu_count < 1:
+                raise RuntimeError(
+                    "RETRIEVER_FAISS_GPU=true requested GPU FAISS, but no CUDA GPU is "
+                    "visible to FAISS. Check CUDA_VISIBLE_DEVICES and the NVIDIA driver."
+                )
+            print(f"Sharding FAISS index over {gpu_count} visible GPU(s)", flush=True)
             clone_options = faiss.GpuMultipleClonerOptions()
             clone_options.useFloat16 = True
             clone_options.shard = True

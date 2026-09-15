@@ -60,11 +60,16 @@ for flag in "$RUN_CONVAGENT_3B" "$RUN_CONVAGENT_7B" "$RUN_CHATR1_3B" "$RUN_CHATR
     echo "ERROR: each RUN_* switch must be true or false." >&2; exit 2;
   }
 done
-for model_path in "$MODEL_3B_PATH" "$MODEL_7B_PATH"; do
-  [[ -f "$model_path/config.json" ]] || {
-    echo "ERROR: missing local Hugging Face model directory: $model_path" >&2; exit 2;
+if [[ "$RUN_CONVAGENT_3B" == true || "$RUN_CHATR1_3B" == true ]]; then
+  [[ -f "$MODEL_3B_PATH/config.json" ]] || {
+    echo "ERROR: a requested 3B stage needs a local Hugging Face model directory: $MODEL_3B_PATH" >&2; exit 2;
   }
-done
+fi
+if [[ "$RUN_CONVAGENT_7B" == true || "$RUN_CHATR1_7B" == true ]]; then
+  [[ -f "$MODEL_7B_PATH/config.json" ]] || {
+    echo "ERROR: a requested 7B stage needs a local Hugging Face model directory: $MODEL_7B_PATH" >&2; exit 2;
+  }
+fi
 
 run_one() {
   local baseline="$1" model_path="$2" model_tag="$3" experiment_name="$4" repo_id="$5"
