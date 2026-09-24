@@ -9,6 +9,8 @@ This repository provides the current protocol-matched comparison among **ConvAge
 | Policy initialization | Qwen2.5-3B-Instruct or Qwen2.5-7B-Instruct |
 | Static baseline rollout count | n=8 |
 | TurnPPO rollout count | n=1 |
+| Feedback-GRPO System rollout count | 1 first response + 8 revised responses per source |
+| Feedback-GRPO System loss | revised-response GRPO only; first-response loss weight = 0 |
 | Training / monitor batch | 128 / 256 |
 | Prompt / response / model context | 4096 / 500 / 8192 tokens |
 | PPO mini-batch / micro-batch | 64 / 1 per GPU |
@@ -23,6 +25,7 @@ Every method emits one answer. If a source sample has several acceptable answer 
 - **ConvAgent** uses GRPO and its action space: answer, clarify, nonanswer, and search. Its paper reward is maximum answer F1 plus direct-evidence reward. Clarify/nonanswer do not receive answer-text F1. Its final summary contains F1, BERTScore-F1, NDCG@3, and action accuracy.
 - **ChatR1** uses PPO/GAE (gamma=lambda=1) with a separate actor and critic, both initialized from the matching 3B or 7B Qwen model. It retains one answer-only source row with all answer references and reports F1, BERTScore-F1, and NDCG@3.
 - **TurnPPO** uses online PPO/GAE (gamma=.99, lambda=.95) and distinct 3B actor/critic models. A frozen Qwen-32B simulator gives public feedback only as later-turn context, never satisfaction or patience reward. Its terminal reward combines action/format terms with max answer F1 (or clarify F1 when gold is clarify), then performs dynamic and static InsCiT test evaluation.
+- **Feedback-GRPO** alternates two independent 3B policies: a System policy that produces action-formatted responses and a learned User policy that generates one textual feedback message. The System phase samples one legal first response, one frozen-User feedback, and an eight-candidate revised-response GRPO group; only the revised responses update the System policy. The User phase uses the improvement from first to second System reward to update feedback tokens. It has independent direct-response and feedback-refinement selection tracks, and exports/uploads both selected policies.
 
 ## Setup
 
@@ -31,8 +34,13 @@ MAX_JOBS=8 bash scripts/install_h100_eval_env.sh interactivechat-r1
 conda activate interactivechat-r1
 python -m pip install -r requirements-eval-metrics.txt
 python -m pip install -r requirements-retriever.txt
-python -m pip install wandb       # optional, for dashboards
-wandb login                       # optional, once per server
+python -m pip install -U wandb huggingface_hub
+wandb login
+python - <<'PY'
+from huggingface_hub import HfApi, login
+login()  # securely prompts for a write-enabled token when one is not cached
+print("Hugging Face account:", HfApi().whoami()["name"])
+PY
 ~~~
 
 Expected local paths:
@@ -406,6 +414,123 @@ eval_log/inscit/<experiment>/metrics_summary.json
 eval_log/inscit/<experiment>_test/metrics_summary.json
 eval_log/inscit/<experiment>_static_inscit/metrics_summary.json
 ~~~
+
+## Feedback-GRPO InsCiT 3B
+
+Feedback-GRPO trains **two separate Qwen2.5-3B-Instruct policies** in one
+process: the System policy and the learned User-feedback policy. It does not
+use the external 32B TurnPPO user-simulator service. Both policies start from
+the original 3B weights, have independent optimizers, and are exported to two
+separate Hugging Face repositories.
+
+The run needs the original static ConvAgent InsCiT source Parquets and the
+dataset-matched InsCiT E5 index/corpus. Download/build the InsCiT assets in
+[Passage corpora and E5 FAISS indexes](#passage-corpora-and-e5-faiss-indexes)
+if they are not already present, then verify the expected inputs:
+
+~~~bash
+test -f data/static_convagent_raw/ConvAgent/inscit/inscit_train.parquet
+test -f data/static_convagent_raw/ConvAgent/inscit/inscit_test.parquet
+test -f collection/inscit/e5_Flat.index
+test -f collection/inscit/inscit_index.jsonl
+~~~
+
+Start the **InsCiT retriever on GPUs 0 and 1**. `RETRIEVER_FAISS_GPU=true`
+requires the GPU-capable FAISS installation described above; it shards the
+index across the two visible GPUs. Do not point this server at a QReCC index.
+
+~~~bash
+mkdir -p logs
+nohup env \
+  CUDA_VISIBLE_DEVICES=0,1 \
+  RETRIEVER_FAISS_GPU=true \
+  RETRIEVER_INDEX_PATH=$PWD/collection/inscit/e5_Flat.index \
+  RETRIEVER_CORPUS_PATH=$PWD/collection/inscit/inscit_index.jsonl \
+  RETRIEVER_MODEL_PATH=intfloat/e5-base-v2 \
+  INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
+  bash scripts/run_local_retriever_server.sh \
+  > logs/inscit_feedback_grpo_retriever.log 2>&1 &
+
+tail -f logs/inscit_feedback_grpo_retriever.log
+~~~
+
+Wait for `Uvicorn running on http://127.0.0.1:8002`; the Feedback-GRPO launcher
+also sends a `/retrieve` readiness probe before it starts training.
+
+The following is the **feedback-refinement** experiment: it selects and
+early-stops on the second System response after learned User feedback. This is
+a two-round result and must not be presented as a direct one-response
+comparison with ConvAgent/ChatR1. It uses GPUs 2 and 3 for training, performs
+monitor validation every five System updates, tests both direct and second
+response views at the selected pair, automatically keeps only that paired
+checkpoint, exports both policies, then uploads both when `HF_UPLOAD=true`.
+
+~~~bash
+nohup env \
+  CUDA_VISIBLE_DEVICES=2,3 \
+  N_GPUS=2 \
+  ULYSSES_SEQUENCE_PARALLEL_SIZE=1 \
+  SYSTEM_MODEL_PATH=$PWD/models/Qwen2.5-3B-Instruct \
+  USER_MODEL_PATH=$PWD/models/Qwen2.5-3B-Instruct \
+  SELECTION_SETTING=feedback-refinement \
+  EXPERIMENT_NAME=feedback_grpo_inscit_qwen25_3b_feedback_second_only_cuda23_v1 \
+  HOLDOUT_FRACTION=0.10 \
+  SPLIT_SEED=42 \
+  ROLLOUT_N=8 \
+  TRAIN_BATCH_SIZE=128 \
+  VAL_BATCH_SIZE=256 \
+  USER_UPDATES_PER_PHASE=5 \
+  SYSTEM_UPDATES_PER_PHASE=5 \
+  VALIDATE_EVERY=5 \
+  EARLY_STOP_PATIENCE=3 \
+  MAX_EMPTY_SYSTEM_BATCHES=20 \
+  ROLLOUT_BATCH_SIZE=8 \
+  LOGPROB_BATCH_SIZE=2 \
+  ROLLOUT_GPU_MEMORY_UTILIZATION=0.10 \
+  BERT_SCORE_DEVICE=cpu \
+  BERT_SCORE_BATCH_SIZE=8 \
+  WANDB_ENABLED=true \
+  WANDB_PROJECT=interactivechat-r1 \
+  WANDB_RUN_GROUP=inscit_feedback_grpo_3b_feedback_second_only_cuda23 \
+  HF_UPLOAD=true \
+  HF_UPLOAD_NUM_WORKERS=4 \
+  HF_SYSTEM_REPO_ID=DrewZhang/interactivechat-r1-feedback-grpo-inscit-qwen25-3b-feedback-second-only-cuda23-system \
+  HF_USER_REPO_ID=DrewZhang/interactivechat-r1-feedback-grpo-inscit-qwen25-3b-feedback-second-only-cuda23-user \
+  INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
+  bash scripts/run_feedback_grpo_inscit_3b_train_eval_export_upload.sh \
+  > logs/feedback_grpo_inscit_3b_feedback_second_only_cuda23_v1.log 2>&1 &
+~~~
+
+System training has one retried first response, one frozen-User feedback, and
+eight same-prompt revised System samples per source: **9 System episodes**, not
+the former `8 + 8 x 8 = 72`. Invalid first responses are retried at most twice;
+sources with no legal terminal action are skipped. Invalid revised samples are
+filtered and a revised group needs at least two valid candidates. Only revised
+tokens have System loss weight 1; the first response has loss weight 0 but is
+logged and evaluated.
+
+For a direct one-response experiment, start a **fresh** run with
+`SELECTION_SETTING=direct-response`, a distinct `EXPERIMENT_NAME`, W&B group,
+and two different HF repository IDs. It selects/early-stops using the first
+response; feedback-refinement selects/early-stops using the second response.
+Do not resume an old pre-`second-only` Feedback-GRPO experiment into this
+recipe.
+
+The selected pair and both evaluation views are stored here:
+
+~~~text
+outputs/feedback_grpo/<experiment>/final_checkpoint.txt
+exports/feedback_grpo/<experiment>/{system,user}/
+eval_log/feedback_grpo/<experiment>/monitor/system_step_*/
+  first_response_metrics/metrics_summary.json
+  feedback_round_two_metrics/metrics_summary.json
+eval_log/feedback_grpo/<experiment>/official_test/
+  first_response_metrics/metrics_summary.json
+  feedback_round_two_metrics/metrics_summary.json
+~~~
+
+See [docs/feedback_grpo.md](docs/feedback_grpo.md) for the reward equations,
+group filtering, checkpoint/resume behavior, and detailed W&B diagnostics.
 
 ## W&B and actor-only exports
 
