@@ -299,9 +299,9 @@ def main() -> None:
         ground_truth_passages = (
             ground_truth_passage_texts if retrieval_match_mode == "passage_text" else ground_truth_passage_ids
         )
-        # Feedback-GRPO retains the source-selected action for auditing but may
-        # expose a ConvAgent-style permissible action set. Evaluate against
-        # that set when it is available, matching the current static protocol.
+        # Simulated-user Turn-PPO records retain the source-selected action
+        # for auditing but may expose a ConvAgent-style permissible action
+        # set.  Use that set for action accuracy and answer-only metrics.
         expected_actions = as_action_set(row.get("permissible_actions", row.get("expected_action")))
         predicted_action = as_text(row.get("predicted_action", "")).strip().lower()
         format_valid = bool(row.get("format_valid", False)) if expected_actions else None
