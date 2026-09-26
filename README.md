@@ -47,7 +47,8 @@ MAX_JOBS=8 bash scripts/install_h100_eval_env.sh interactivechat-r1
 conda activate interactivechat-r1
 python -m pip install -r requirements-eval-metrics.txt
 python -m pip install -r requirements-retriever.txt
-python -m pip install -U wandb huggingface_hub
+# Transformers in this environment requires huggingface_hub < 1.0.
+python -m pip install -U wandb "huggingface_hub>=0.26,<1.0"
 ~~~
 
 Authenticate W&B and Hugging Face once per server. The Python Hugging Face login
@@ -101,14 +102,15 @@ test -f collection/inscit/e5_Flat.index
 
 ## GPU-FAISS setup for the InsCiT retriever
 
-The retriever below keeps the FAISS index on GPUs 0 and 1. It requires a
-GPU-enabled FAISS binding; faiss-cpu is insufficient.
+GPU-FAISS must run on GPUs separate from Feedback-GRPO training. The documented
+workflow places the GPU-resident InsCiT index on GPUs 2 and 3 and the two 3B
+training policies on GPUs 0 and 1.
 
 ~~~bash
 conda activate interactivechat-r1
 bash scripts/install_gpu_faiss_cuda121.sh
 
-CUDA_VISIBLE_DEVICES=0,1 python - <<'PY'
+CUDA_VISIBLE_DEVICES=2,3 python - <<'PY'
 import faiss
 print("Faiss:", getattr(faiss, "__version__", "unknown"))
 print("GPU API:", hasattr(faiss, "GpuMultipleClonerOptions"))
@@ -122,15 +124,15 @@ The verification must print GPU API: True and Visible GPUs: 2. If the installer
 proposes removing PyTorch, vLLM, FlashAttention, or the Conda environment,
 cancel that transaction and resolve the package conflict first.
 
-## Start the InsCiT retriever on GPUs 0 and 1
+## Start the InsCiT GPU-FAISS retriever on GPUs 2 and 3
 
-Start this before Feedback-GRPO training. It uses the InsCiT FAISS index and
-corpus on port 8002.
+Start this before Feedback-GRPO training. The large FAISS index and E5 query
+encoder stay on GPUs 2 and 3, separate from the two System/User policies.
 
 ~~~bash
 mkdir -p logs
 nohup env \
-  CUDA_VISIBLE_DEVICES=0,1 \
+  CUDA_VISIBLE_DEVICES=2,3 \
   RETRIEVER_FAISS_GPU=true \
   RETRIEVER_INDEX_PATH=$PWD/collection/inscit/e5_Flat.index \
   RETRIEVER_CORPUS_PATH=$PWD/collection/inscit/inscit_index.jsonl \
@@ -146,7 +148,7 @@ Wait for Uvicorn running on http://127.0.0.1:8002. The training launcher also
 performs a /retrieve readiness probe and exits before training if the retriever
 cannot serve requests.
 
-## Train Feedback-GRPO on GPUs 2 and 3
+## Train Feedback-GRPO on GPUs 0 and 1
 
 No external user-simulator server is required: the learned User policy runs
 inside the Feedback-GRPO process. This command runs the feedback-refinement
@@ -156,13 +158,13 @@ directly comparable one-response baseline score.
 
 ~~~bash
 nohup env \
-  CUDA_VISIBLE_DEVICES=2,3 \
+  CUDA_VISIBLE_DEVICES=0,1 \
   N_GPUS=2 \
   ULYSSES_SEQUENCE_PARALLEL_SIZE=1 \
   SYSTEM_MODEL_PATH=$PWD/models/Qwen2.5-3B-Instruct \
   USER_MODEL_PATH=$PWD/models/Qwen2.5-3B-Instruct \
   SELECTION_SETTING=feedback-refinement \
-  EXPERIMENT_NAME=feedback_grpo_inscit_qwen25_3b_feedback_second_only_cuda23_v1 \
+  EXPERIMENT_NAME=feedback_grpo_inscit_qwen25_3b_feedback_second_only_cuda01_v1 \
   HOLDOUT_FRACTION=0.10 \
   SPLIT_SEED=42 \
   ROLLOUT_N=8 \
@@ -180,14 +182,14 @@ nohup env \
   BERT_SCORE_BATCH_SIZE=8 \
   WANDB_ENABLED=true \
   WANDB_PROJECT=interactivechat-r1 \
-  WANDB_RUN_GROUP=inscit_feedback_grpo_3b_feedback_second_only_cuda23 \
+  WANDB_RUN_GROUP=inscit_feedback_grpo_3b_feedback_second_only_cuda01 \
   HF_UPLOAD=true \
   HF_UPLOAD_NUM_WORKERS=4 \
-  HF_SYSTEM_REPO_ID=DrewZhang/interactivechat-r1-feedback-grpo-inscit-qwen25-3b-feedback-second-only-cuda23-system \
-  HF_USER_REPO_ID=DrewZhang/interactivechat-r1-feedback-grpo-inscit-qwen25-3b-feedback-second-only-cuda23-user \
+  HF_SYSTEM_REPO_ID=DrewZhang/interactivechat-r1-feedback-grpo-inscit-qwen25-3b-feedback-second-only-cuda01-system \
+  HF_USER_REPO_ID=DrewZhang/interactivechat-r1-feedback-grpo-inscit-qwen25-3b-feedback-second-only-cuda01-user \
   INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
   bash scripts/run_feedback_grpo_inscit_3b_train_eval_export_upload.sh \
-  > logs/feedback_grpo_inscit_3b_feedback_second_only_cuda23_v1.log 2>&1 &
+  > logs/feedback_grpo_inscit_3b_feedback_second_only_cuda01_v1.log 2>&1 &
 ~~~
 
 The launcher validates both response views every five System updates, saves
