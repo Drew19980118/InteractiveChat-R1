@@ -106,6 +106,21 @@ python -m pip install -r requirements-retriever.txt
 python -m pip install -U swanlab "huggingface_hub>=0.26,<1.0"
 ```
 
+Feedback-GRPO imports FlashAttention during System/User actor construction.
+The H100 installer builds the pinned extension; confirm that it is available:
+
+```bash
+python -c 'from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input; print("flash-attn: OK")'
+```
+
+If the import fails, repair the extension only. Do not run an unconstrained
+`pip install flash-attn`, which can replace the pinned PyTorch runtime:
+
+```bash
+python -m pip install 'ninja==1.13.0'
+MAX_JOBS=8 python -m pip install --no-deps --no-build-isolation --no-cache-dir 'flash-attn==2.5.8'
+```
+
 Authenticate SwanLab and Hugging Face once per server. The Python login path is
 compatible with both older and newer Hugging Face CLI installations; never put
 your token in a shell command or tracked file.
