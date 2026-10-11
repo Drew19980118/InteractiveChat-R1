@@ -58,17 +58,18 @@ subcommands. Do not put an access token in shell history, a script, or Git.
 ~~~bash
 swanlab login
 
-python - <<'PY'
-from huggingface_hub import HfApi, login
-login()  # prompts securely if no token is cached
-print("Hugging Face account:", HfApi().whoami()["name"])
-PY
+# Do not use ``python - <<'PY'`` here: that consumes stdin and prevents the
+# secure token / Git-credential prompts from reading the terminal.
+python -c 'from huggingface_hub import HfApi, login; login(); print("Hugging Face account:", HfApi().whoami()["name"])'
 ~~~
 
 The launchers use SwanLab by default. `SWANLAB_ENABLED=false` keeps console
 logging only. Set `SWANLAB_PROJECT`, `SWANLAB_RUN_GROUP`, and optionally
-`SWANLAB_MODE` (`online`, `offline`, or `local`) per experiment. Local SwanLab
-event files default to `swanlog/`; override that location with `SWANLAB_LOGDIR`.
+`SWANLAB_MODE` (`online`, `offline`, or `local`) per experiment. The launchers
+translate `SWANLAB_PROJECT` to SwanLab's `SWANLAB_PROJ_NAME` and remove the
+former before the SDK starts, avoiding a settings-parser conflict in recent
+SwanLab releases. Local SwanLab event files default to `swanlog/`; override
+that location with `SWANLAB_LOGDIR`.
 `SWANLAB_LOG_VAL_GENERATIONS` controls how many validation generations are
 logged as SwanLab text artifacts for the standard static training launchers.
 

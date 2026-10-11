@@ -50,6 +50,9 @@ EVAL_ROOT="${EVAL_ROOT:-$PROJECT_ROOT/eval_log/feedback_grpo}"
 EXPORT_ROOT="${EXPORT_ROOT:-$PROJECT_ROOT/exports/feedback_grpo}"
 SWANLAB_ENABLED="${SWANLAB_ENABLED:-true}"
 SWANLAB_PROJECT="${SWANLAB_PROJECT:-interactivechat-r1}"
+# configure_swanlab unsets SWANLAB_PROJECT to protect the SwanLab SDK's
+# settings parser, so retain the launcher's CLI value separately.
+SWANLAB_LAUNCH_PROJECT="$SWANLAB_PROJECT"
 SWANLAB_RUN_GROUP="${SWANLAB_RUN_GROUP:-inscit_feedback_grpo_3b}"
 HF_UPLOAD="${HF_UPLOAD:-true}"
 HF_UPLOAD_NUM_WORKERS="${HF_UPLOAD_NUM_WORKERS:-4}"
@@ -161,7 +164,7 @@ arguments=(
   --rollout-memory "${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.15}"
   --bert-score-device "${BERT_SCORE_DEVICE:-cpu}"
   --bert-score-batch-size "${BERT_SCORE_BATCH_SIZE:-8}"
-  --swanlab-project "$SWANLAB_PROJECT"
+  --swanlab-project "$SWANLAB_LAUNCH_PROJECT"
   --swanlab-group "$SWANLAB_RUN_GROUP"
   --system-repo-id "$HF_SYSTEM_REPO_ID"
   --user-repo-id "$HF_USER_REPO_ID"

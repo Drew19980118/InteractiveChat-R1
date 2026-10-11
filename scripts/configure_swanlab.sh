@@ -16,7 +16,13 @@ configure_swanlab() {
         echo "Install it with: python -m pip install -U swanlab" >&2
         exit 2
       fi
-      export SWANLAB_PROJ_NAME="${SWANLAB_PROJECT:-interactivechat-r1}"
+      # ``SWANLAB_PROJECT`` remains a backwards-compatible launcher input.
+      # Recent SwanLab SDK releases also parse that name as a nested Pydantic
+      # ``project`` object, where a plain project-name string fails before
+      # ``swanlab.init`` can apply its explicit argument.  Translate it to the
+      # SDK's scalar variable and remove the conflicting alias before import.
+      export SWANLAB_PROJ_NAME="${SWANLAB_PROJECT:-${SWANLAB_PROJ_NAME:-interactivechat-r1}}"
+      unset SWANLAB_PROJECT
       export SWANLAB_GROUP="${SWANLAB_RUN_GROUP:-inscit_static_comparison}"
       export SWANLAB_MODE="${SWANLAB_MODE:-online}"
       export SWANLAB_LOGDIR="${SWANLAB_LOGDIR:-$PROJECT_ROOT/swanlog}"

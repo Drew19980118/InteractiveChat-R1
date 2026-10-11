@@ -112,17 +112,18 @@ your token in a shell command or tracked file.
 
 ```bash
 swanlab login
-python - <<'PY'
-from huggingface_hub import HfApi, login
-login()
-print("Hugging Face account:", HfApi().whoami()["name"])
-PY
+# Keep stdin attached to the terminal so login can ask about the token and
+# optional Git credential integration.
+python -c 'from huggingface_hub import HfApi, login; login(); print("Hugging Face account:", HfApi().whoami()["name"])'
 ```
 
 The launcher records to SwanLab by default. Set `SWANLAB_ENABLED=false` for
 console-only logging. `SWANLAB_PROJECT`, `SWANLAB_RUN_GROUP`, `SWANLAB_MODE`
 (`online`, `offline`, or `local`), and `SWANLAB_LOGDIR` control the tracked
 project, grouping, transport mode, and local event directory respectively.
+The launcher translates `SWANLAB_PROJECT` to the SDK's `SWANLAB_PROJ_NAME` and
+removes the former before importing SwanLab; this avoids a recent SDK
+settings-parser conflict with a plain project-name string.
 
 Start the **InsCiT** GPU-FAISS retriever on GPUs 0 and 1 before training. It
 must use the InsCiT index and row-aligned corpus, never the QReCC pair:
