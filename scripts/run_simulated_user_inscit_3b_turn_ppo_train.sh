@@ -82,8 +82,8 @@ conda activate "$IGPO_CONDA_ENV"
 export CUDA_VISIBLE_DEVICES TOKENIZERS_PARALLELISM=false PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1
 export RAY_memory_monitor_refresh_ms=0 VLLM_ATTENTION_BACKEND=XFORMERS
 export IGPO_MAX_SEARCH_QUERIES=1 IGPO_SEARCH_TOP_K=3
-source "$PROJECT_ROOT/scripts/configure_wandb.sh"
-configure_wandb
+source "$PROJECT_ROOT/scripts/configure_swanlab.sh"
+configure_swanlab
 
 if [[ ! -f "$TRAIN_FILE" || ! -f "$MONITOR_FILE" ]]; then
   python -u scripts/prepare_simulated_user_monitor_split.py \
@@ -228,7 +228,7 @@ python -u -m verl.trainer.main_ppo \
   "algorithm.simulated_user_validation_context_batching=true" \
   "algorithm.simulated_user_intermediate_validation_freq=0" \
   "trainer.logger=$TRAINER_LOGGERS" \
-  "trainer.log_val_generations=$WANDB_LOG_VAL_GENERATIONS" \
+  "trainer.log_val_generations=$SWANLAB_LOG_VAL_GENERATIONS" \
   "trainer.project_name=inscit" \
   "trainer.experiment_name=$EXPERIMENT_NAME" \
   "trainer.default_hdfs_dir=null" \

@@ -105,9 +105,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--bert-score-model", default="roberta-large")
     parser.add_argument("--bert-score-device", default="cpu")
     parser.add_argument("--bert-score-batch-size", type=int, default=8)
-    parser.add_argument("--wandb", action="store_true")
-    parser.add_argument("--wandb-project", default="interactivechat-r1")
-    parser.add_argument("--wandb-group", default="")
+    parser.add_argument("--swanlab", action="store_true")
+    parser.add_argument("--swanlab-project", default="interactivechat-r1")
+    parser.add_argument("--swanlab-group", default="")
     parser.add_argument("--system-repo-id", default="")
     parser.add_argument("--user-repo-id", default="")
     parser.add_argument("--resume", action="store_true")
@@ -580,10 +580,16 @@ def run(args: argparse.Namespace) -> None:
     else:
         _atomic_json(manifest, {"configuration_signature": signature, **split})
 
+    if args.swanlab_group:
+        # Keep this explicit CLI setting authoritative while still allowing
+        # direct library users to configure SwanLab with its standard env var.
+        import os
+
+        os.environ["SWANLAB_GROUP"] = args.swanlab_group
     tracker = Tracking(
-        project_name=args.wandb_project,
+        project_name=args.swanlab_project,
         experiment_name=args.experiment,
-        default_backend=["console", "wandb"] if args.wandb else ["console"],
+        default_backend=["console", "swanlab"] if args.swanlab else ["console"],
         config={"recipe": "feedback_grpo", "n": args.n, "train_batch_size": args.train_batch_size,
                 "val_batch_size": args.val_batch_size, "seed": args.seed, "split": split,
                 "selection_setting": args.selection_setting,

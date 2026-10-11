@@ -48,15 +48,15 @@ conda activate interactivechat-r1
 python -m pip install -r requirements-eval-metrics.txt
 python -m pip install -r requirements-retriever.txt
 # Transformers in this environment requires huggingface_hub < 1.0.
-python -m pip install -U wandb "huggingface_hub>=0.26,<1.0"
+python -m pip install -U swanlab "huggingface_hub>=0.26,<1.0"
 ~~~
 
-Authenticate W&B and Hugging Face once per server. The Python Hugging Face login
+Authenticate SwanLab and Hugging Face once per server. The Python Hugging Face login
 works regardless of whether the installed hf CLI uses the old or new auth
 subcommands. Do not put an access token in shell history, a script, or Git.
 
 ~~~bash
-wandb login
+swanlab login
 
 python - <<'PY'
 from huggingface_hub import HfApi, login
@@ -64,6 +64,13 @@ login()  # prompts securely if no token is cached
 print("Hugging Face account:", HfApi().whoami()["name"])
 PY
 ~~~
+
+The launchers use SwanLab by default. `SWANLAB_ENABLED=false` keeps console
+logging only. Set `SWANLAB_PROJECT`, `SWANLAB_RUN_GROUP`, and optionally
+`SWANLAB_MODE` (`online`, `offline`, or `local`) per experiment. Local SwanLab
+event files default to `swanlog/`; override that location with `SWANLAB_LOGDIR`.
+`SWANLAB_LOG_VAL_GENERATIONS` controls how many validation generations are
+logged as SwanLab text artifacts for the standard static training launchers.
 
 ## Download only the 3B model and InsCiT assets
 
@@ -180,9 +187,10 @@ nohup env \
   ROLLOUT_GPU_MEMORY_UTILIZATION=0.10 \
   BERT_SCORE_DEVICE=cpu \
   BERT_SCORE_BATCH_SIZE=8 \
-  WANDB_ENABLED=true \
-  WANDB_PROJECT=interactivechat-r1 \
-  WANDB_RUN_GROUP=inscit_feedback_grpo_3b_feedback_second_only_cuda01 \
+  SWANLAB_ENABLED=true \
+  SWANLAB_PROJECT=interactivechat-r1 \
+  SWANLAB_RUN_GROUP=inscit_feedback_grpo_3b_feedback_second_only_cuda01 \
+  SWANLAB_MODE=online \
   HF_UPLOAD=true \
   HF_UPLOAD_NUM_WORKERS=4 \
   HF_SYSTEM_REPO_ID=DrewZhang/interactivechat-r1-feedback-grpo-inscit-qwen25-3b-feedback-second-only-cuda01-system \
@@ -197,7 +205,7 @@ only the best selected System/User checkpoint pair, evaluates that pair on the
 official InsCiT test set, exports both policies, and uploads both repositories
 when HF_UPLOAD=true.
 
-For a direct-response experiment, use a fresh EXPERIMENT_NAME, W&B group, and
+For a direct-response experiment, use a fresh EXPERIMENT_NAME, SwanLab group, and
 two new HF repository IDs, and set SELECTION_SETTING=direct-response. That
 track selects by the first response. Do not resume an older pre-second-only
 experiment into this recipe.
@@ -218,7 +226,7 @@ eval_log/feedback_grpo/<experiment>/official_test/
   feedback_round_two_metrics/metrics_summary.json
 ~~~
 
-W&B contains separate user/*, system/*, val/direct_response/*, and
+SwanLab contains separate user/*, system/*, val/direct_response/*, and
 val/feedback_refinement/* series. For this launch, the selected metric is
 val/feedback_refinement/composite.
 

@@ -252,7 +252,7 @@ trainer:
   total_training_steps: null
   project_name: verl_examples
   experiment_name: gsm8k
-  logger: ['console', 'wandb']
+  logger: ['console', 'swanlab']
   log_val_generations: 0
   nnodes: 1
   n_gpus_per_node: 8

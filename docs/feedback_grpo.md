@@ -103,21 +103,26 @@ MAX_JOBS=8 bash scripts/install_h100_eval_env.sh interactivechat-r1
 conda activate interactivechat-r1
 python -m pip install -r requirements-eval-metrics.txt
 python -m pip install -r requirements-retriever.txt
-python -m pip install -U wandb huggingface_hub
+python -m pip install -U swanlab "huggingface_hub>=0.26,<1.0"
 ```
 
-Authenticate W&B and Hugging Face once per server. The Python login path is
+Authenticate SwanLab and Hugging Face once per server. The Python login path is
 compatible with both older and newer Hugging Face CLI installations; never put
 your token in a shell command or tracked file.
 
 ```bash
-wandb login
+swanlab login
 python - <<'PY'
 from huggingface_hub import HfApi, login
 login()
 print("Hugging Face account:", HfApi().whoami()["name"])
 PY
 ```
+
+The launcher records to SwanLab by default. Set `SWANLAB_ENABLED=false` for
+console-only logging. `SWANLAB_PROJECT`, `SWANLAB_RUN_GROUP`, `SWANLAB_MODE`
+(`online`, `offline`, or `local`), and `SWANLAB_LOGDIR` control the tracked
+project, grouping, transport mode, and local event directory respectively.
 
 Start the **InsCiT** GPU-FAISS retriever on GPUs 0 and 1 before training. It
 must use the InsCiT index and row-aligned corpus, never the QReCC pair:
@@ -153,9 +158,10 @@ nohup env \
   EXPERIMENT_NAME=feedback_grpo_inscit_qwen25_3b_feedback_second_only_cuda23_v1 \
   HOLDOUT_FRACTION=0.10 \
   SPLIT_SEED=42 \
-  WANDB_ENABLED=true \
-  WANDB_PROJECT=interactivechat-r1 \
-  WANDB_RUN_GROUP=inscit_feedback_grpo_3b_feedback_second_only_cuda23 \
+  SWANLAB_ENABLED=true \
+  SWANLAB_PROJECT=interactivechat-r1 \
+  SWANLAB_RUN_GROUP=inscit_feedback_grpo_3b_feedback_second_only_cuda23 \
+  SWANLAB_MODE=online \
   HF_UPLOAD=true \
   HF_SYSTEM_REPO_ID=DrewZhang/interactivechat-r1-feedback-grpo-inscit-qwen25-3b-feedback-second-only-cuda23-system \
   HF_USER_REPO_ID=DrewZhang/interactivechat-r1-feedback-grpo-inscit-qwen25-3b-feedback-second-only-cuda23-user \

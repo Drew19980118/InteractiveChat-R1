@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Union
 
 
 class Tracking:
-    supported_backend = ["wandb", "mlflow", "swanlab", "vemlp_wandb", "tensorboard", "console"]
+    supported_backend = ["mlflow", "swanlab", "vemlp_wandb", "tensorboard", "console"]
 
     def __init__(self, project_name, experiment_name, default_backend: Union[str, List[str]] = "console", config=None):
         if isinstance(default_backend, str):
@@ -33,32 +33,11 @@ class Tracking:
             if backend == "tracking":
                 import warnings
 
-                warnings.warn("`tracking` logger is deprecated. use `wandb` instead.", DeprecationWarning, stacklevel=2)
+                warnings.warn("`tracking` logger is deprecated. use `swanlab` instead.", DeprecationWarning, stacklevel=2)
             else:
                 assert backend in self.supported_backend, f"{backend} is not supported"
 
         self.logger = {}
-
-        if "tracking" in default_backend or "wandb" in default_backend:
-            import wandb
-
-            # Keep trainer.project_name stable for checkpoint paths while
-            # allowing multiple methods to be compared in one W&B project.
-            # Standard W&B environment variables are also convenient on a
-            # remote no-SSH session and do not place credentials in scripts.
-            wandb_kwargs = {
-                "project": os.environ.get("WANDB_PROJECT", project_name),
-                "name": experiment_name,
-                "config": config,
-            }
-            entity = os.environ.get("WANDB_ENTITY")
-            if entity:
-                wandb_kwargs["entity"] = entity
-            run_group = os.environ.get("WANDB_RUN_GROUP")
-            if run_group:
-                wandb_kwargs["group"] = run_group
-            wandb.init(**wandb_kwargs)
-            self.logger["wandb"] = wandb
 
         if "mlflow" in default_backend:
             import mlflow
@@ -74,21 +53,28 @@ class Tracking:
             mlflow.log_params(_compute_mlflow_params_from_objects(config))
             self.logger["mlflow"] = _MlflowLoggingAdapter()
 
-        if "swanlab" in default_backend:
+        if "tracking" in default_backend or "swanlab" in default_backend:
             import swanlab
 
-            SWANLAB_API_KEY = os.environ.get("SWANLAB_API_KEY", None)
-            SWANLAB_LOG_DIR = os.environ.get("SWANLAB_LOG_DIR", "swanlog")
-            SWANLAB_MODE = os.environ.get("SWANLAB_MODE", "cloud")
-            if SWANLAB_API_KEY:
-                swanlab.login(SWANLAB_API_KEY)  # NOTE: previous login information will be overwritten
-            swanlab.init(
-                project=project_name,
-                experiment_name=experiment_name,
-                config={"FRAMEWORK": "veRL", **config},
-                logdir=SWANLAB_LOG_DIR,
-                mode=SWANLAB_MODE,
-            )
+            # SwanLab reads SWANLAB_API_KEY itself.  Do not call login() here:
+            # that would overwrite an existing server-side credential cache and
+            # needlessly makes every Ray parent process re-authenticate.
+            swanlab_kwargs = {
+                "project": os.environ.get("SWANLAB_PROJ_NAME", project_name),
+                "experiment_name": os.environ.get("SWANLAB_EXP_NAME", experiment_name),
+                "config": {"FRAMEWORK": "veRL", **(config or {})},
+                # SWANLAB_LOGDIR is the documented SDK variable.  Keep the
+                # old underscore spelling as a compatibility fallback.
+                "logdir": os.environ.get("SWANLAB_LOGDIR", os.environ.get("SWANLAB_LOG_DIR", "swanlog")),
+                "mode": os.environ.get("SWANLAB_MODE", "online"),
+            }
+            workspace = os.environ.get("SWANLAB_WORKSPACE")
+            group = os.environ.get("SWANLAB_GROUP")
+            if workspace:
+                swanlab_kwargs["workspace"] = workspace
+            if group:
+                swanlab_kwargs["group"] = group
+            swanlab.init(**swanlab_kwargs)
             self.logger["swanlab"] = swanlab
 
         if "vemlp_wandb" in default_backend:
@@ -124,8 +110,6 @@ class Tracking:
                 logger_instance.log(data=data, step=step)
 
     def __del__(self):
-        if "wandb" in self.logger:
-            self.logger["wandb"].finish(exit_code=0)
         if "swanlab" in self.logger:
             self.logger["swanlab"].finish()
         if "vemlp_wandb" in self.logger:
@@ -199,39 +183,10 @@ def _flatten_dict(raw: Dict[str, Any], *, sep: str) -> Dict[str, Any]:
 @dataclasses.dataclass
 class ValidationGenerationsLogger:
     def log(self, loggers, samples, step):
-        if "wandb" in loggers:
-            self.log_generations_to_wandb(samples, step)
         if "swanlab" in loggers:
             self.log_generations_to_swanlab(samples, step)
         if "mlflow" in loggers:
             self.log_generations_to_mlflow(samples, step)
-
-    def log_generations_to_wandb(self, samples, step):
-        """Log samples to wandb as a table"""
-        import wandb
-
-        # Create column names for all samples
-        columns = ["step"] + sum([[f"input_{i + 1}", f"output_{i + 1}", f"score_{i + 1}"] for i in range(len(samples))], [])
-
-        if not hasattr(self, "validation_table"):
-            # Initialize the table on first call
-            self.validation_table = wandb.Table(columns=columns)
-
-        # Create a new table with same columns and existing data
-        # Workaround for https://github.com/wandb/wandb/issues/2981#issuecomment-1997445737
-        new_table = wandb.Table(columns=columns, data=self.validation_table.data)
-
-        # Add new row with all data
-        row_data = []
-        row_data.append(step)
-        for sample in samples:
-            row_data.extend(sample)
-
-        new_table.add_data(*row_data)
-
-        # Update reference and log
-        wandb.log({"val/generations": new_table}, step=step)
-        self.validation_table = new_table
 
     def log_generations_to_swanlab(self, samples, step):
         """Log samples to swanlab as text"""

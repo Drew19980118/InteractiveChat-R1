@@ -27,7 +27,7 @@ tensordict==0.5.0
 # Configuration & logging
 hydra-core
 omegaconf
-wandb
+swanlab
 codetiming
 PyYAML
 pydantic

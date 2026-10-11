@@ -55,7 +55,7 @@ extras_require = {
   # InteractiveChat-R1 uses the console logger and the local retriever.  These
   # legacy VERL integrations remain available without making a clean runtime
   # resolve their broad, potentially version-changing dependency trees.
-  'tracking': ['wandb'],
+  'tracking': ['swanlab'],
   'web-agent': ['smolagents'],
 }
 

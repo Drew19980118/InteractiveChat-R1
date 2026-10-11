@@ -48,18 +48,18 @@ EXPERIMENT_NAME="${EXPERIMENT_NAME:-$DEFAULT_EXPERIMENT_NAME}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$PROJECT_ROOT/outputs/feedback_grpo}"
 EVAL_ROOT="${EVAL_ROOT:-$PROJECT_ROOT/eval_log/feedback_grpo}"
 EXPORT_ROOT="${EXPORT_ROOT:-$PROJECT_ROOT/exports/feedback_grpo}"
-WANDB_ENABLED="${WANDB_ENABLED:-true}"
-WANDB_PROJECT="${WANDB_PROJECT:-interactivechat-r1}"
-WANDB_RUN_GROUP="${WANDB_RUN_GROUP:-inscit_feedback_grpo_3b}"
+SWANLAB_ENABLED="${SWANLAB_ENABLED:-true}"
+SWANLAB_PROJECT="${SWANLAB_PROJECT:-interactivechat-r1}"
+SWANLAB_RUN_GROUP="${SWANLAB_RUN_GROUP:-inscit_feedback_grpo_3b}"
 HF_UPLOAD="${HF_UPLOAD:-true}"
 HF_UPLOAD_NUM_WORKERS="${HF_UPLOAD_NUM_WORKERS:-4}"
 HF_SYSTEM_REPO_ID="${HF_SYSTEM_REPO_ID:-$DEFAULT_SYSTEM_REPO_ID}"
 HF_USER_REPO_ID="${HF_USER_REPO_ID:-$DEFAULT_USER_REPO_ID}"
 RESUME="${RESUME:-false}"
 
-for boolean in "$HF_UPLOAD" "$WANDB_ENABLED" "$RESUME"; do
+for boolean in "$HF_UPLOAD" "$SWANLAB_ENABLED" "$RESUME"; do
   if [[ "$boolean" != true && "$boolean" != false ]]; then
-    echo "ERROR: HF_UPLOAD, WANDB_ENABLED and RESUME must be true or false." >&2
+    echo "ERROR: HF_UPLOAD, SWANLAB_ENABLED and RESUME must be true or false." >&2
     exit 2
   fi
 done
@@ -88,8 +88,8 @@ if [[ "$ULYSSES_SEQUENCE_PARALLEL_SIZE" != "1" ]]; then
   exit 2
 fi
 
-source "$SCRIPT_DIR/configure_wandb.sh"
-configure_wandb
+source "$SCRIPT_DIR/configure_swanlab.sh"
+configure_swanlab
 
 # The rollout continues using the native local search endpoint. The learned
 # user is a second training policy; no external simulator server is required.
@@ -161,12 +161,12 @@ arguments=(
   --rollout-memory "${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.15}"
   --bert-score-device "${BERT_SCORE_DEVICE:-cpu}"
   --bert-score-batch-size "${BERT_SCORE_BATCH_SIZE:-8}"
-  --wandb-project "$WANDB_PROJECT"
-  --wandb-group "$WANDB_RUN_GROUP"
+  --swanlab-project "$SWANLAB_PROJECT"
+  --swanlab-group "$SWANLAB_RUN_GROUP"
   --system-repo-id "$HF_SYSTEM_REPO_ID"
   --user-repo-id "$HF_USER_REPO_ID"
 )
-if [[ "$WANDB_ENABLED" == true ]]; then arguments+=(--wandb); fi
+if [[ "$SWANLAB_ENABLED" == true ]]; then arguments+=(--swanlab); fi
 if [[ "$RESUME" == true ]]; then arguments+=(--resume); fi
 
 echo "[Feedback GRPO] CUDA=$CUDA_VISIBLE_DEVICES; system/user each own one full GPU; n=${ROLLOUT_N:-8}."

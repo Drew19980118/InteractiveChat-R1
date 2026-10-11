@@ -168,8 +168,8 @@ export PET_NODE_RANK="${PET_NODE_RANK:-0}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export RAY_memory_monitor_refresh_ms=0 VLLM_ATTENTION_BACKEND=XFORMERS
 export IGPO_MAX_SEARCH_QUERIES="$MAX_SEARCH_QUERIES" IGPO_SEARCH_TOP_K=3
-source "$PROJECT_ROOT/scripts/configure_wandb.sh"
-configure_wandb
+source "$PROJECT_ROOT/scripts/configure_swanlab.sh"
+configure_swanlab
 
 if [[ "$STATIC_BASELINE" == "chatr1" ]]; then
   if [[ ! -f "$RAW_TRAIN_SOURCE" ]]; then
@@ -307,7 +307,7 @@ python -u -m verl.trainer.main_ppo \
   "algorithm.max_search_queries=$MAX_SEARCH_QUERIES" \
   "algorithm.simulated_user_enabled=false" \
   "trainer.logger=$TRAINER_LOGGERS" \
-  "trainer.log_val_generations=$WANDB_LOG_VAL_GENERATIONS" \
+  "trainer.log_val_generations=$SWANLAB_LOG_VAL_GENERATIONS" \
   "trainer.project_name=$PROJECT_NAME" \
   "trainer.experiment_name=$EXPERIMENT_NAME" \
   "trainer.default_hdfs_dir=null" \

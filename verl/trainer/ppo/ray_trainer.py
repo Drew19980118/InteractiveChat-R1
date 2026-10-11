@@ -1218,7 +1218,7 @@ class RayPPOTrainer:
         print(f"Dumped generations to {filename}")
 
     def _maybe_log_val_generations(self, inputs, outputs, scores):
-        """Log a table of validation samples to the configured logger (wandb or swanlab)"""
+        """Log validation samples to the configured SwanLab-compatible logger."""
 
         generations_to_log = self.config.trainer.log_val_generations
 
@@ -2985,12 +2985,12 @@ class RayPPOTrainer:
                 n_gpus = self.resource_pool_manager.get_n_gpus()
                 metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
                 
-                # Send every update to W&B when enabled so its standard veRL
+                # Send every update to SwanLab when enabled so its standard veRL
                 # panels include actor reward/entropy/KL and critic value-loss
                 # curves, rather than only sparse checkpoint events.  Keep the
                 # console and local metric JSON cadence compact.
-                if "wandb" in list(self.config.trainer.logger):
-                    logger.log(data=metrics, step=self.global_steps, backend=["wandb"])
+                if "swanlab" in list(self.config.trainer.logger):
+                    logger.log(data=metrics, step=self.global_steps, backend=["swanlab"])
 
                 # Persist/log complete metrics at every selection validation,
                 # checkpoint, or final step.  This is deliberately independent
