@@ -60,12 +60,25 @@ python -c 'from flash_attn.bert_padding import index_first_axis, pad_input, unpa
 
 If the import fails in an otherwise correctly pinned environment, repair only
 the missing extension without allowing pip to replace the locked PyTorch/vLLM
-runtime:
+runtime. The CUDA toolkit used to compile the extension must match
+`torch.version.cuda` exactly. For the pinned `torch==2.4.0+cu121` runtime this
+means CUDA **12.1**, not a CUDA 13.x system default:
 
 ~~~bash
 python -m pip install 'ninja==1.13.0'
+CUDA_HOME=/usr/local/cuda-12.1 \
+PATH=/usr/local/cuda-12.1/bin:$PATH \
+LD_LIBRARY_PATH=/usr/local/cuda-12.1/lib64:${LD_LIBRARY_PATH:-} \
 MAX_JOBS=8 python -m pip install --no-deps --no-build-isolation --no-cache-dir 'flash-attn==2.5.8'
 python -c 'from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input; print("flash-attn: OK")'
+~~~
+
+If `/usr/local/cuda-12.1/bin/nvcc` is absent, install a CUDA 12.1 toolkit into
+the active Conda environment, then replace `/usr/local/cuda-12.1` above with
+`$CONDA_PREFIX`:
+
+~~~bash
+conda install -y -p "$CONDA_PREFIX" -c nvidia 'cuda-toolkit=12.1'
 ~~~
 
 Authenticate SwanLab and Hugging Face once per server. The Python Hugging Face login

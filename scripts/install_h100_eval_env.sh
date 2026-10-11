@@ -140,6 +140,43 @@ echo "Installing Ninja before building FlashAttention (MAX_JOBS=${MAX_JOBS})..."
 python -m pip install 'ninja==1.13.0'
 command -v ninja >/dev/null 2>&1 || fail "Ninja was installed but is not on PATH."
 
+torch_cuda_version="$(python -c 'import torch; print(torch.version.cuda or "")')"
+[[ -n "${torch_cuda_version}" ]] || fail "The installed PyTorch has no CUDA version."
+
+# Compiling an extension with the system's newest CUDA toolkit is not safe when
+# its minor version differs from the CUDA version embedded in the Torch wheel.
+# In particular, a CUDA 13 toolkit cannot build an extension for Torch
+# 2.4.0+cu121.  Prefer an explicit CUDA_HOME, then a matching toolkit in the
+# Conda prefix or conventional /usr/local installation locations.
+nvcc_on_path="$(command -v nvcc || true)"
+nvcc_parent=""
+if [[ -n "${nvcc_on_path}" ]]; then
+    nvcc_parent="$(cd "$(dirname "${nvcc_on_path}")/.." && pwd)"
+fi
+cuda_candidates=(
+    "${CUDA_HOME:-}"
+    "${CONDA_PREFIX}"
+    "${nvcc_parent}"
+    "/usr/local/cuda-${torch_cuda_version}"
+    "/usr/local/cuda"
+)
+matching_cuda_home=""
+for candidate in "${cuda_candidates[@]}"; do
+    [[ -n "${candidate}" && -x "${candidate}/bin/nvcc" ]] || continue
+    candidate_version="$("${candidate}/bin/nvcc" --version | sed -nE 's/.*release ([0-9]+\.[0-9]+).*/\1/p' | head -n 1)"
+    if [[ "${candidate_version}" == "${torch_cuda_version}" ]]; then
+        matching_cuda_home="${candidate}"
+        break
+    fi
+done
+if [[ -z "${matching_cuda_home}" ]]; then
+    fail "FlashAttention needs CUDA toolkit ${torch_cuda_version} to match Torch, but none was found. Install cuda-toolkit=${torch_cuda_version} in this Conda environment or expose /usr/local/cuda-${torch_cuda_version}, then rerun."
+fi
+export CUDA_HOME="${matching_cuda_home}"
+export PATH="${CUDA_HOME}/bin:${PATH}"
+export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${CUDA_HOME}/lib:${LD_LIBRARY_PATH:-}"
+echo "Building FlashAttention with CUDA toolkit ${torch_cuda_version}: ${CUDA_HOME}"
+
 echo "Building FlashAttention from source..."
 # Torch has been repaired above.  FlashAttention's package metadata leaves its
 # ``torch`` dependency unpinned; combined with ``--force-reinstall``, pip
