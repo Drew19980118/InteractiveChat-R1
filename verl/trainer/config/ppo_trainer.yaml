@@ -220,6 +220,12 @@ algorithm:
   # Native static baseline modes. They retain their released action grammar
   # and never invoke the online simulated user.
   static_convagent_mode: false
+  # Evaluate a dynamic-policy checkpoint against static ConvAgent labels while
+  # retaining the dynamic <tool_call> action grammar.  Unlike
+  # ``static_convagent_mode``, this affects only label/reference extraction
+  # and terminal-action metrics; it does not replace the policy prompt or its
+  # tool protocol with the native static <search> contract.
+  static_convagent_action_aware_evaluation: false
   # Zero-shot ReAct evaluation with a native Qwen policy. It reuses the static
   # ConvAgent action labels and search environment but supplies an explicit
   # ReAct action grammar instead of a trained baseline's implicit prompt.
@@ -229,6 +235,54 @@ algorithm:
   # Opt-in original-paper ConvAgent reward: R_outcome + 0.5 * (R_IG + R_MIA)
   # is formed before trajectory-level GRPO normalization.
   static_convagent_paper_reward: false
+  # Whether the paper ConvAgent R_IG retrieval-evidence term is included in
+  # the terminal trajectory reward.  Turning this off retains R_outcome and
+  # the InsCiT MIA action term, while search execution/evaluation is unchanged.
+  static_convagent_retrieval_reward: true
+  # Whether the paper ConvAgent InsCiT MIA action term is included in the
+  # terminal trajectory reward. Disabling it still parses actions for metrics.
+  static_convagent_action_reward: true
+  # Optional, small terminal-format component for a static ConvAgent GRPO
+  # ablation. It is added outside the paper's 0.5 * (R_IG + R_MIA) term, so a
+  # valid-but-wrong action is distinguishable from malformed output. It does
+  # not affect validation metrics or the checkpoint-selection composite.
+  static_convagent_format_reward: false
+  static_convagent_format_valid_reward: 0.1
+  static_convagent_format_invalid_reward: -0.1
+  # Replace the paper ConvAgent answer max-F1 outcome with the frozen external
+  # IGT user-simulator reconstruction reward. Retrieval reward remains a
+  # separate switch above and should be false for the IGT experiment.
+  static_convagent_igt_reward: false
+  static_convagent_igt_base_url: null
+  static_convagent_igt_model: null
+  static_convagent_igt_timeout_seconds: 300
+  static_convagent_igt_batch_size: 32
+  static_convagent_igt_tau: 0.5
+  static_convagent_igt_reward_floor: 0.0
+  static_convagent_igt_reward_ceiling: 1.2
+  # Replace the static ConvAgent max-F1 answer outcome with semantic
+  # sentence coverage: each gold sentence takes its highest BERTScore F1 over
+  # all predicted sentences, the gold-sentence scores are averaged, and the
+  # maximum is taken over released answer references. The retrieval and MIA
+  # action terms above remain independently configurable.
+  static_convagent_sentence_bertscore_reward: false
+  # If true, add sentence BERTScore coverage to (rather than replace) the
+  # native max-reference token-F1 answer outcome.
+  static_convagent_sentence_bertscore_additive_f1: false
+  # CPU is the safe default because actor/reference/critic workers occupy the
+  # training GPUs. Set this to cuda:0 only when a dedicated scorer GPU exists.
+  static_convagent_sentence_bertscore_model: roberta-large
+  static_convagent_sentence_bertscore_device: cpu
+  static_convagent_sentence_bertscore_batch_size: 32
+  # Replace the native answer max-F1 outcome with frozen whole-answer
+  # BERTScore F1, maximised over released answer references.
+  static_convagent_bertscore_reward: false
+  # If true, add whole-answer BERTScore F1 to (rather than replace) the
+  # native max-reference token-F1 answer outcome.
+  static_convagent_bertscore_additive_f1: false
+  static_convagent_bertscore_model: roberta-large
+  static_convagent_bertscore_device: cpu
+  static_convagent_bertscore_batch_size: 32
   static_chatr1_mode: false
   static_chatr1_intent_reward: false
   static_chatr1_intent_weight: 1.0
@@ -251,17 +305,15 @@ algorithm:
   # broadcast across the action's generated tokens.  It requires
   # ``adv_estimator=gae`` and one rollout per source context.
   simulated_user_turn_ppo: false
-  # Terminal response reward used only by ``simulated_user_turn_ppo``. A
-  # valid format is neutral, malformed output is penalized, and a correct
-  # answer/clarify is rewarded by benchmark-aligned lexical F1 only. Do not
-  # add a fixed correct-action bonus: it rewards arbitrary legal answers.
-  simulated_user_turn_ppo_action_correct_reward: 0.0
-  simulated_user_turn_ppo_action_incorrect_reward: -1.0
-  # Correct nonanswer has no response text, so give it a small positive
-  # reward while retaining the stronger -1 incorrect-action penalty.
-  simulated_user_turn_ppo_nonanswer_correct_reward: 0.2
+  # Terminal response reward used only by ``simulated_user_turn_ppo``. Match
+  # ConvAgent Eq. (2)'s MIA: a permissible, format-valid action earns +1.0;
+  # a wrong or malformed action earns -0.5. Answer/clarify max-F1 is added
+  # separately below.
+  simulated_user_turn_ppo_action_correct_reward: 1.0
+  simulated_user_turn_ppo_action_incorrect_reward: -0.5
+  simulated_user_turn_ppo_nonanswer_correct_reward: 0.0
   simulated_user_turn_ppo_format_valid_reward: 0.0
-  simulated_user_turn_ppo_format_invalid_reward: -1.0
+  simulated_user_turn_ppo_format_invalid_reward: 0.0
   simulated_user_turn_ppo_answer_f1_weight: 1.0
   simulated_user_turn_ppo_clarify_f1_weight: 1.0
   simulated_user_allow_clarify: true
@@ -392,8 +444,9 @@ trainer:
   export_actor_hf_path: null
   export_actor_hf_max_shard_size: 2GB
   default_local_dir: ./outputs/${trainer.project_name}/${trainer.experiment_name}
-  # Selection-mode static baselines and Turn-PPO retain only the newly saved
-  # monitor-best global_step_* checkpoint. Set false only for debugging.
+  # Static-baseline and Turn-PPO selection runs retain only the newly saved
+  # monitor-best global_step_* checkpoint. Set false only when intentionally
+  # retaining all candidates for debugging.
   keep_only_best_checkpoint: true
   max_actor_ckpt_to_keep: null
   max_critic_ckpt_to_keep: null

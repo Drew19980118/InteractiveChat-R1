@@ -1,266 +1,311 @@
-# InteractiveChat-R1
+# InteractiveChat-R1: InSCIT static vs GPT-4.1 simulated-dynamic context
 
-This README documents the current **Feedback-GRPO InsCiT 3B** experiment only.
+This repository is configured for one experiment only: test whether ConvAgent
+trained on **static ground-truth dialogue histories** behaves differently from
+ConvAgent trained on **frozen GPT-4.1 simulated-dynamic histories**.
 
-## Method
+The experiment is not a human online-dialogue study. Its correct name is
+**GPT-4.1 simulated dynamic context**.
 
-Feedback-GRPO alternates two independent Qwen2.5-3B-Instruct policies:
+## What is held fixed
 
-- **System policy**: produces the current query's action-formatted response.
-- **User policy**: reads only the System terminal content plus dialogue context and produces one feedback message. It is a learned policy, not a value critic and not an external vLLM simulator.
+The two datasets contain exactly the same current query, direct-answer
+references, evidence labels, expected action, `pair_id`, and conversation-level
+train/monitor assignment. The sole differing field is the public history.
 
-Both policies have their own parameters and optimizers. Training uses GRPO without
-a learned value head.
+- `static`: each preceding Assistant turn is the first non-empty InSCIT
+  `directAnswer` reference.
+- `dynamic`: each preceding Assistant turn is produced by frozen
+  `gpt-4.1-2025-04-14` after one local retrieval. A GPT-4.1 User Judge can
+  issue up to two natural corrective feedback messages before the final answer
+  is accepted into the public history.
 
-| Component | Current setting |
-| --- | --- |
-| Dataset | static ConvAgent InsCiT |
-| Model initialization | two independent Qwen2.5-3B-Instruct policies |
-| System source cost | 1 first response + 1 User feedback + 8 revised responses |
-| System GRPO loss | revised System responses only; first-response loss weight = 0 |
-| User phase | 1 shared first System response, 8 User feedbacks, 1 revised response per feedback |
-| System reward | maximum-reference answer F1 + 0.5 × action score |
-| Retrieval / extra format reward | disabled |
-| Rollout group size | 8 |
-| Train / monitor source batch | 128 / 256 |
-| User / System alternation | 5 User updates, then 5 System updates |
-| Holdout | 10% dialogue-disjoint source split, seed 42 |
-| Validation | every 5 completed System updates |
-| Early stopping | 3 selected-track validations without strict improvement |
+For each dynamic historical turn the builder executes:
 
-A valid permissible terminal action has action score +1; wrong or malformed
-actions have -0.5. For answer actions, F1 is the maximum token-set F1 over
-all released answer references. Clarify/nonanswer actions receive no answer-text
-F1. Retrieval reward is not used.
+```text
+public history + current query
+  -> GPT-4.1 function call: standalone search query
+  -> local InSCIT E5/FAISS retriever: top-3 passages
+  -> GPT-4.1: <answer>...</answer>, conditioned on those passages
+  -> GPT-4.1 User Judge: directness-only decision / optional feedback
+```
 
-In the System phase, a malformed first response is retried at most twice. A
-source with no legal first terminal action is skipped. Malformed revised
-responses are filtered; an effective System GRPO group requires at least two
-valid revised candidates.
+The Judge does not see ground-truth answers and checks only whether the answer
+addresses the question, not factual correctness. A separate GPT-4.1 dependency
+check can see prior ground truth solely to decide whether a dynamic history is
+sufficient for the next query. Static and dynamic rows are removed together
+when that gate fails.
 
-## One-time environment setup
+The RL reward in both runs is the same full ConvAgent reward:
 
-Run these steps once in the server-side InteractiveChat-R1 project:
+\[
+R = R_{\mathrm{F1}} + 0.5(R_{\mathrm{retrieval}} + R_{\mathrm{action}}).
+\]
 
-~~~bash
-MAX_JOBS=8 bash scripts/install_h100_eval_env.sh interactivechat-r1
+No BERTScore, IGT, sentence-BERTScore, or format reward is used for training.
+
+## GPU layout
+
+| GPUs | Process |
+|---|---|
+| `0,1` | InSCIT E5 encoder + GPU-FAISS retriever on port `8002` |
+| `3,4` | Two-GPU Qwen2.5-3B ConvAgent training and final evaluation |
+
+Keep the retriever running for data construction, RL training, monitor
+validation, and 2x2 evaluation.
+
+## 1. One-time environment setup
+
+The reproducible setup is Linux x86_64, Python 3.10, PyTorch 2.4.0+cu121,
+vLLM 0.6.3, and FlashAttention 2.5.8. Do **not** run a broad
+`pip install -r requirements.txt`: it can replace the pinned PyTorch/vLLM
+runtime.
+
+The installer builds FlashAttention with Ninja and multiple compile workers.
+`MAX_JOBS=8` is the default; raise it only if the host has ample CPU and RAM.
+The installer refuses to compile FlashAttention with a CUDA toolkit whose
+version differs from `torch.version.cuda`, preventing the CUDA 13 vs cu121
+mismatch.
+
+```bash
+cd /workspace/zwd/InteractiveChat-R1
+
+MAX_JOBS=8 CMAKE_BUILD_PARALLEL_LEVEL=8 \
+  bash scripts/install_h100_eval_env.sh interactivechat-r1
+
 conda activate interactivechat-r1
-python -m pip install -r requirements-eval-metrics.txt
-python -m pip install -r requirements-retriever.txt
-# Transformers in this environment requires huggingface_hub < 1.0.
-python -m pip install -U swanlab "huggingface_hub>=0.26,<1.0"
-~~~
 
-The H100 installer builds the required FlashAttention extension. Verify it
-before launching Feedback-GRPO:
+# GPT-4.1 client, SwanLab, BERTScore, and parquet/request dependencies.
+python -m pip install --upgrade-strategy only-if-needed \
+  -r requirements-context-ablation.txt
+python -m pip check
 
-~~~bash
-python -c 'from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input; print("flash-attn: OK")'
-~~~
+python - <<'PY'
+import torch
+from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input
 
-If the import fails in an otherwise correctly pinned environment, repair only
-the missing extension without allowing pip to replace the locked PyTorch/vLLM
-runtime. The CUDA toolkit used to compile the extension must match
-`torch.version.cuda` exactly. For the pinned `torch==2.4.0+cu121` runtime this
-means CUDA **12.1**, not a CUDA 13.x system default:
-
-~~~bash
-python -m pip install 'ninja==1.13.0'
-CUDA_HOME=/usr/local/cuda-12.1 \
-PATH=/usr/local/cuda-12.1/bin:$PATH \
-LD_LIBRARY_PATH=/usr/local/cuda-12.1/lib64:${LD_LIBRARY_PATH:-} \
-MAX_JOBS=8 python -m pip install --no-deps --no-build-isolation --no-cache-dir 'flash-attn==2.5.8'
-python -c 'from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input; print("flash-attn: OK")'
-~~~
-
-If `/usr/local/cuda-12.1/bin/nvcc` is absent, install a CUDA 12.1 toolkit into
-the active Conda environment, then replace `/usr/local/cuda-12.1` above with
-`$CONDA_PREFIX`:
-
-~~~bash
-conda install -y -p "$CONDA_PREFIX" -c nvidia 'cuda-toolkit=12.1'
-~~~
-
-Authenticate SwanLab and Hugging Face once per server. The Python Hugging Face login
-works regardless of whether the installed hf CLI uses the old or new auth
-subcommands. Do not put an access token in shell history, a script, or Git.
-
-~~~bash
-swanlab login
-
-# Do not use ``python - <<'PY'`` here: that consumes stdin and prevents the
-# secure token / Git-credential prompts from reading the terminal.
-python -c 'from huggingface_hub import HfApi, login; login(); print("Hugging Face account:", HfApi().whoami()["name"])'
-~~~
-
-The launchers use SwanLab by default. `SWANLAB_ENABLED=false` keeps console
-logging only. Set `SWANLAB_PROJECT`, `SWANLAB_RUN_GROUP`, and optionally
-`SWANLAB_MODE` (`online`, `offline`, or `local`) per experiment. The launchers
-translate `SWANLAB_PROJECT` to SwanLab's `SWANLAB_PROJ_NAME` and remove the
-former before the SDK starts, avoiding a settings-parser conflict in recent
-SwanLab releases. Local SwanLab event files default to `swanlog/`; override
-that location with `SWANLAB_LOGDIR`.
-`SWANLAB_LOG_VAL_GENERATIONS` controls how many validation generations are
-logged as SwanLab text artifacts for the standard static training launchers.
-
-## Download only the 3B model and InsCiT assets
-
-All model paths passed to the launcher must be local model directories containing
-config.json.
-
-~~~bash
-mkdir -p models data/static_convagent_raw collection
-hf download Qwen/Qwen2.5-3B-Instruct \
-  --local-dir models/Qwen2.5-3B-Instruct
-
-hf download DrewZhang/conv --repo-type dataset \
-  --include "ConvAgent/**" \
-  --local-dir data/static_convagent_raw
-~~~
-
-Download the dataset-matched InsCiT passage shards and build the row-aligned
-corpus/index. Both retrieval files must come from InsCiT. Reserve roughly 350 GB
-of free disk space for the downloaded shards, corpus, and merged index.
-
-~~~bash
-hf download DrewZhang/inscit-passages-index --repo-type dataset \
-  --local-dir collection/inscit --max-workers 4
-
-python scripts/build_inscit_corpus.py \
-  --collection-dir collection/inscit
-
-cat collection/inscit/e5_Flat.index.part_* \
-  > collection/inscit/e5_Flat.index
-
-test -f data/static_convagent_raw/ConvAgent/inscit/inscit_train.parquet
-test -f data/static_convagent_raw/ConvAgent/inscit/inscit_test.parquet
-test -f collection/inscit/inscit_index.jsonl
-test -f collection/inscit/e5_Flat.index
-~~~
-
-## GPU-FAISS setup for the InsCiT retriever
-
-GPU-FAISS must run on GPUs separate from Feedback-GRPO training. The documented
-workflow places the GPU-resident InsCiT index on GPUs 2 and 3 and the two 3B
-training policies on GPUs 0 and 1.
-
-~~~bash
-conda activate interactivechat-r1
-bash scripts/install_gpu_faiss_cuda121.sh
-
-CUDA_VISIBLE_DEVICES=2,3 python - <<'PY'
-import faiss
-print("Faiss:", getattr(faiss, "__version__", "unknown"))
-print("GPU API:", hasattr(faiss, "GpuMultipleClonerOptions"))
-print("Visible GPUs:", faiss.get_num_gpus())
-assert hasattr(faiss, "GpuMultipleClonerOptions")
-assert faiss.get_num_gpus() == 2
+print("torch:", torch.__version__, "CUDA:", torch.version.cuda)
+print("flash-attn: OK")
 PY
-~~~
+```
 
-The verification must print GPU API: True and Visible GPUs: 2. If the installer
-proposes removing PyTorch, vLLM, FlashAttention, or the Conda environment,
-cancel that transaction and resolve the package conflict first.
+If a pre-existing environment is missing only FlashAttention, do not use a
+plain `pip install flash-attn` command. First expose a CUDA toolkit matching
+the installed Torch CUDA version, then rebuild dependency-free with multiple
+workers:
 
-## Start the InsCiT GPU-FAISS retriever on GPUs 2 and 3
+```bash
+conda activate interactivechat-r1
 
-Start this before Feedback-GRPO training. The large FAISS index and E5 query
-encoder stay on GPUs 2 and 3, separate from the two System/User policies.
+export CUDA_HOME=/usr/local/cuda-12.1   # must match: python -c 'import torch; print(torch.version.cuda)'
+export PATH="$CUDA_HOME/bin:$PATH"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64:$CUDA_HOME/lib:${LD_LIBRARY_PATH:-}"
 
-~~~bash
+MAX_JOBS=8 CMAKE_BUILD_PARALLEL_LEVEL=8 \
+  python -m pip install --force-reinstall --no-deps --no-build-isolation \
+  --no-cache-dir --verbose 'flash-attn==2.5.8'
+
+python -c 'from flash_attn.bert_padding import index_first_axis; print("flash-attn: OK")'
+```
+
+`--verbose` prints compilation commands; in another terminal, use `htop` or
+`ps -ef | grep -E "ninja|cc1plus"` to observe parallel compilation. Do not
+use a CUDA 13 system compiler to build an extension for Torch `+cu121`.
+
+Authenticate SwanLab once in an interactive terminal:
+
+```bash
+swanlab login
+```
+
+There is no Hugging Face login or model upload in this experiment.
+
+## 2. Required local assets
+
+Before starting, the following paths must exist:
+
+```bash
+test -d models/Qwen2.5-3B-Instruct
+test -f data/inscit_train.json
+test -f data/inscit_test.json
+test -f collection/inscit/e5_Flat.index
+test -f collection/inscit/inscit_index.jsonl
+```
+
+Install GPU FAISS once in the locked Conda environment if it is not already
+available:
+
+```bash
+conda activate interactivechat-r1
+FAISS_VISIBLE_GPUS=0,1 FAISS_EXPECTED_GPUS=2 \
+  bash scripts/install_gpu_faiss_cuda121.sh
+```
+
+## 3. Start the InSCIT retriever on GPUs 0 and 1
+
+```bash
+cd /workspace/zwd/InteractiveChat-R1
 mkdir -p logs
+
 nohup env \
-  CUDA_VISIBLE_DEVICES=2,3 \
+  CUDA_VISIBLE_DEVICES=0,1 \
   RETRIEVER_FAISS_GPU=true \
   RETRIEVER_INDEX_PATH=$PWD/collection/inscit/e5_Flat.index \
   RETRIEVER_CORPUS_PATH=$PWD/collection/inscit/inscit_index.jsonl \
   RETRIEVER_MODEL_PATH=intfloat/e5-base-v2 \
   INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
   bash scripts/run_local_retriever_server.sh \
-  > logs/inscit_feedback_grpo_retriever.log 2>&1 &
+  > logs/inscit_context_ablation_retriever_cuda01.log 2>&1 &
 
-tail -f logs/inscit_feedback_grpo_retriever.log
-~~~
+tail -f logs/inscit_context_ablation_retriever_cuda01.log
+```
 
-Wait for Uvicorn running on http://127.0.0.1:8002. The training launcher also
-performs a /retrieve readiness probe and exits before training if the retriever
-cannot serve requests.
+Wait for Uvicorn on `http://127.0.0.1:8002`, then verify it:
 
-## Train Feedback-GRPO on GPUs 0 and 1
+```bash
+curl -sS -X POST http://127.0.0.1:8002/retrieve \
+  -H 'Content-Type: application/json' \
+  -d '{"queries":["InSCIT readiness"],"topk":3,"return_scores":true}'
+```
 
-No external user-simulator server is required: the learned User policy runs
-inside the Feedback-GRPO process. This command runs the feedback-refinement
-setting, so it selects and early-stops using the post-feedback second System
-response. It must be reported as a two-round interaction result, not as a
-directly comparable one-response baseline score.
+## 4. Configure GPT-4.1 securely and construct paired data
 
-~~~bash
+Use a newly rotated API key belonging to the server/account that has permitted
+OpenAI API access. Never add the key to README, a shell script, Git, command
+history, or a `nohup env OPENAI_API_KEY=...` command.
+
+```bash
+read -rsp 'OpenAI API key: ' OPENAI_API_KEY
+export OPENAI_API_KEY
+echo
+```
+
+Run a two-conversation smoke build first. Successful requests are cached;
+`RESUME=true` continues interrupted work without repeating completed API calls.
+
+```bash
+cd /workspace/zwd/InteractiveChat-R1
+
 nohup env \
-  CUDA_VISIBLE_DEVICES=0,1 \
-  N_GPUS=2 \
-  ULYSSES_SEQUENCE_PARALLEL_SIZE=1 \
-  SYSTEM_MODEL_PATH=$PWD/models/Qwen2.5-3B-Instruct \
-  USER_MODEL_PATH=$PWD/models/Qwen2.5-3B-Instruct \
-  SELECTION_SETTING=feedback-refinement \
-  EXPERIMENT_NAME=feedback_grpo_inscit_qwen25_3b_feedback_second_only_cuda01_v1 \
-  HOLDOUT_FRACTION=0.10 \
-  SPLIT_SEED=42 \
-  ROLLOUT_N=8 \
-  TRAIN_BATCH_SIZE=128 \
-  VAL_BATCH_SIZE=256 \
-  USER_UPDATES_PER_PHASE=5 \
-  SYSTEM_UPDATES_PER_PHASE=5 \
-  VALIDATE_EVERY=5 \
-  EARLY_STOP_PATIENCE=3 \
-  MAX_EMPTY_SYSTEM_BATCHES=20 \
-  ROLLOUT_BATCH_SIZE=8 \
-  LOGPROB_BATCH_SIZE=2 \
-  ROLLOUT_GPU_MEMORY_UTILIZATION=0.10 \
-  BERT_SCORE_DEVICE=cpu \
-  BERT_SCORE_BATCH_SIZE=8 \
-  SWANLAB_ENABLED=true \
-  SWANLAB_PROJECT=interactivechat-r1 \
-  SWANLAB_RUN_GROUP=inscit_feedback_grpo_3b_feedback_second_only_cuda01 \
-  SWANLAB_MODE=online \
-  HF_UPLOAD=true \
-  HF_UPLOAD_NUM_WORKERS=4 \
-  HF_SYSTEM_REPO_ID=DrewZhang/interactivechat-r1-feedback-grpo-inscit-qwen25-3b-feedback-second-only-cuda01-system \
-  HF_USER_REPO_ID=DrewZhang/interactivechat-r1-feedback-grpo-inscit-qwen25-3b-feedback-second-only-cuda01-user \
+  OUTPUT_DIR=$PWD/data/inscit_context_ablation/gpt41_smoke \
+  BUILDER_PROVIDER=openai \
+  BUILDER_MODEL=gpt-4.1-2025-04-14 \
+  LIMIT_CONVERSATIONS=2 \
+  WORKERS=2 \
+  MAX_TRANSIENT_RETRIES=0 \
+  RESUME=true \
+  RETRIEVER_URL=http://127.0.0.1:8002/retrieve \
   INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
-  bash scripts/run_feedback_grpo_inscit_3b_train_eval_export_upload.sh \
-  > logs/feedback_grpo_inscit_3b_feedback_second_only_cuda01_v1.log 2>&1 &
-~~~
+  bash scripts/run_build_inscit_context_ablation.sh \
+  > logs/inscit_context_ablation_gpt41_smoke.log 2>&1 &
 
-The launcher validates both response views every five System updates, saves
-only the best selected System/User checkpoint pair, evaluates that pair on the
-official InsCiT test set, exports both policies, and uploads both repositories
-when HF_UPLOAD=true.
+tail -f logs/inscit_context_ablation_gpt41_smoke.log
+```
 
-For a direct-response experiment, use a fresh EXPERIMENT_NAME, SwanLab group, and
-two new HF repository IDs, and set SELECTION_SETTING=direct-response. That
-track selects by the first response. Do not resume an older pre-second-only
-experiment into this recipe.
+After checking the smoke `audit/` files, build the complete frozen dataset:
 
-## Results and artifacts
+```bash
+nohup env \
+  OUTPUT_DIR=$PWD/data/inscit_context_ablation/gpt41_v1 \
+  BUILDER_PROVIDER=openai \
+  BUILDER_MODEL=gpt-4.1-2025-04-14 \
+  WORKERS=4 \
+  MAX_TRANSIENT_RETRIES=0 \
+  RESUME=true \
+  RETRIEVER_URL=http://127.0.0.1:8002/retrieve \
+  LOG_FILE=$PWD/logs/inscit_dynamic_builder_gpt41.log \
+  INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
+  bash scripts/run_build_inscit_context_ablation.sh \
+  > logs/inscit_context_ablation_gpt41_full.log 2>&1 &
+```
 
-~~~text
-outputs/feedback_grpo/<experiment>/final_checkpoint.txt
-exports/feedback_grpo/<experiment>/system/
-exports/feedback_grpo/<experiment>/user/
+`MAX_TRANSIENT_RETRIES=0` means retry forever for transient API/retriever
+connection failures, timeouts, 408/429, and 5xx responses, with capped
+exponential backoff and jitter. HTTP 400/401/403, model/schema failures, and
+repeated model-format failures stop rather than silently filtering data.
 
-eval_log/feedback_grpo/<experiment>/monitor/system_step_*/
-  first_response_metrics/metrics_summary.json
-  feedback_round_two_metrics/metrics_summary.json
+Outputs:
 
-eval_log/feedback_grpo/<experiment>/official_test/
-  first_response_metrics/metrics_summary.json
-  feedback_round_two_metrics/metrics_summary.json
-~~~
+```text
+data/inscit_context_ablation/gpt41_v1/
+  static/inscit_{train,test}.parquet
+  dynamic/inscit_{train,test}.parquet
+  audit/{train,test}/*.json
+  paired_index.jsonl
+  dropped_turns.jsonl
+  retry_summary.json
+  manifest.json
+```
 
-SwanLab contains separate user/*, system/*, val/direct_response/*, and
-val/feedback_refinement/* series. For this launch, the selected metric is
-val/feedback_refinement/composite.
+## 5. Train paired static and dynamic Qwen2.5-3B ConvAgent models on GPUs 3 and 4
 
-For the reward equations, GRPO grouping/filtering rules, checkpoint semantics,
-and all diagnostics, see [docs/feedback_grpo.md](docs/feedback_grpo.md).
+The suite always trains **static first**, then starts a fresh Qwen2.5-3B model
+for dynamic training. The two runs do not share parameters. A single paired,
+conversation-disjoint 90/10 train/monitor split is created with seed 42.
 
+Each run validates every five RL updates, selects by
+`(F1 + BERTScore-F1 + NDCG@3) / 3`, and early-stops after three consecutive
+validations without a strict improvement. Action accuracy is logged but is not
+part of checkpoint selection.
+
+```bash
+nohup env \
+  CUDA_VISIBLE_DEVICES=3,4 \
+  N_GPUS=2 \
+  ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
+  MODEL_PATH=$PWD/models/Qwen2.5-3B-Instruct \
+  DATA_ROOT=$PWD/data/inscit_context_ablation/gpt41_v1 \
+  EXPERIMENT_PREFIX=convagent_inscit_gpt41_simulated \
+  SWANLAB_PROJ_NAME=interactivechat-r1 \
+  SWANLAB_RUN_GROUP=inscit_context_ablation_gpt41_seed42 \
+  SWANLAB_MODE=online \
+  SELECTION_BERTSCORE_DEVICE=cpu \
+  INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
+  bash scripts/run_inscit_context_ablation_convagent_3b_train_suite.sh \
+  > logs/inscit_context_ablation_gpt41_train_cuda34.log 2>&1 &
+
+tail -f logs/inscit_context_ablation_gpt41_train_cuda34.log
+```
+
+SwanLab shows independent runs named:
+
+```text
+convagent_inscit_gpt41_simulated_static_context_seed42
+convagent_inscit_gpt41_simulated_dynamic_context_seed42
+```
+
+It records RL reward/loss/KL/entropy/learning-rate metrics and validation F1,
+BERTScore F1, NDCG@3, action accuracy, and selection composite. No Hugging
+Face upload is performed; the selected checkpoints remain under
+`outputs/paper_static_convagent/`.
+
+## 6. Run the final paired 2x2 test on GPUs 3 and 4
+
+Run this after both training runs have stopped. It evaluates the two selected
+checkpoints on both static and dynamic test histories: SS, SD, DS, and DD.
+
+```bash
+nohup env \
+  CUDA_VISIBLE_DEVICES=3,4 \
+  N_GPUS=2 \
+  ULYSSES_SEQUENCE_PARALLEL_SIZE=2 \
+  MODEL_PATH=$PWD/models/Qwen2.5-3B-Instruct \
+  DATA_ROOT=$PWD/data/inscit_context_ablation/gpt41_v1 \
+  STATIC_EXPERIMENT=convagent_inscit_gpt41_simulated_static_context_seed42 \
+  DYNAMIC_EXPERIMENT=convagent_inscit_gpt41_simulated_dynamic_context_seed42 \
+  SUMMARY_DIR=$PWD/eval_results/inscit_context_ablation_gpt41_seed42 \
+  BERT_SCORE_DEVICE=cpu \
+  INTERACTIVECHAT_CONDA_ENV=interactivechat-r1 \
+  bash scripts/run_inscit_context_ablation_2x2_eval.sh \
+  > logs/inscit_context_ablation_gpt41_2x2_eval_cuda34.log 2>&1 &
+```
+
+The final paired report is:
+
+```text
+eval_results/inscit_context_ablation_gpt41_seed42/context_ablation_2x2.md
+```
+
+It reports F1, BERTScore F1, NDCG@3, action accuracy, terminal/format success,
+sample count, history-bearing turns, dependency-required and independent
+subsets, and pair-level bootstrap confidence intervals.

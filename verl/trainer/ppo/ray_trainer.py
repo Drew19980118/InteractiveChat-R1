@@ -20,6 +20,7 @@ This trainer supports model-agonistic model initialization with huggingface
 
 import json
 import os
+from pathlib import Path
 import re
 import shutil
 import subprocess
@@ -27,11 +28,11 @@ import sys
 import uuid
 import glob
 from collections import defaultdict
+from collections.abc import Mapping
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
 from pprint import pprint
 from typing import Dict, Iterator, Optional, Type
 
@@ -1141,6 +1142,7 @@ class RayPPOTrainer:
         predicted_actions=None,
         action_corrects=None,
         format_valids=None,
+        sample_metadata=None,
     ):
         
 
@@ -1204,6 +1206,8 @@ class RayPPOTrainer:
             base_data['em_scores'] = em_scores
         if len(noformatf1_scores) == n:
             base_data['noformatf1_scores'] = noformatf1_scores	
+        if sample_metadata is not None and len(sample_metadata) == n:
+            base_data["sample_metadata"] = sample_metadata
 
                         
         for k, v in reward_extra_infos_dict.items():
@@ -1218,7 +1222,7 @@ class RayPPOTrainer:
         print(f"Dumped generations to {filename}")
 
     def _maybe_log_val_generations(self, inputs, outputs, scores):
-        """Log validation samples to the configured SwanLab-compatible logger."""
+        """Log a table of validation samples to the configured logger (wandb or swanlab)"""
 
         generations_to_log = self.config.trainer.log_val_generations
 
@@ -1271,6 +1275,7 @@ class RayPPOTrainer:
         predicted_actions = []
         action_corrects = []
         format_valids = []
+        sample_metadata = []
 
         try:
             validation_total_batches = len(self.val_dataloader)
@@ -1440,12 +1445,48 @@ class RayPPOTrainer:
                         test_gen_batch = test_gen_batch[:norm_len]
                         sample_inputs.extend(input_texts[:norm_len])
 
+                        raw_extra_infos = list(
+                            test_batch.non_tensor_batch.get("extra_info", [{}] * norm_len)
+                        )[:norm_len]
+                        for raw_extra in raw_extra_infos:
+                            info = raw_extra if isinstance(raw_extra, Mapping) else {}
+                            normalized_metadata = {}
+                            for key in (
+                                "pair_id",
+                                "conversation_id",
+                                "turn_index",
+                                "source_turn_index",
+                                "context_variant",
+                                "dependency_class",
+                            ):
+                                value = info.get(key)
+                                if value is None:
+                                    continue
+                                if key in {"turn_index", "source_turn_index"}:
+                                    try:
+                                        value = int(value)
+                                    except (TypeError, ValueError):
+                                        value = str(value)
+                                else:
+                                    value = str(value)
+                                normalized_metadata[key] = value
+                            sample_metadata.append(normalized_metadata)
+
                         batch_reward_models = list(test_batch.non_tensor_batch["reward_model"])[:norm_len]
                         batch_data_sources = list(
                             test_batch.non_tensor_batch.get("data_source", ["unknown"] * norm_len)
                         )[:norm_len]
                         static_convagent_mode = bool(
                             self.config.algorithm.get("static_convagent_mode", False)
+                        )
+                        static_convagent_action_aware_evaluation = bool(
+                            self.config.algorithm.get(
+                                "static_convagent_action_aware_evaluation", False
+                            )
+                        )
+                        static_convagent_labels_enabled = bool(
+                            static_convagent_mode
+                            or static_convagent_action_aware_evaluation
                         )
                         static_chatr1_mode = bool(
                             self.config.algorithm.get("static_chatr1_mode", False)
@@ -1460,7 +1501,7 @@ class RayPPOTrainer:
                             if static_chatr1_mode
                             else (
                                 select_static_convagent_answer_ground_truth_with_passage_ids
-                                if static_convagent_mode
+                                if static_convagent_labels_enabled
                                 else select_answer_ground_truth_with_passage_ids
                             )
                         )
@@ -1635,6 +1676,7 @@ class RayPPOTrainer:
                 predicted_actions=predicted_actions,
                 action_corrects=action_corrects,
                 format_valids=format_valids,
+                sample_metadata=sample_metadata,
             )
             
         return metric_dict
@@ -1757,21 +1799,18 @@ class RayPPOTrainer:
     def _prune_nonbest_global_step_checkpoints(
         checkpoint_root: str, selected_checkpoint: str
     ) -> list[str]:
-        """Remove superseded complete checkpoints after a new best is durable.
+        """Delete stale complete checkpoints after a replacement best is durable.
 
-        Selection-mode training never resumes from intermediate candidates: its
-        only reportable model is the monitor-best checkpoint. Retaining every
-        FSDP actor/critic/optimizer snapshot can otherwise consume hundreds of
-        GB. The deletion scope is deliberately narrow: only direct, real
-        ``global_step_<integer>`` directories under the configured output root
-        can be removed, and symlinks are always left untouched.
+        Selection-mode runs never resume training: their only reportable model
+        is the highest-scoring monitor checkpoint. Keeping every superseded
+        FSDP actor/critic/optimizer checkpoint can consume hundreds of GB.
+        This helper is deliberately narrow: it only removes real, direct
+        ``global_step_<integer>`` children of the configured output directory,
+        and never follows a symlink.
         """
         root = Path(checkpoint_root).resolve()
         selected = Path(selected_checkpoint).resolve()
-        if (
-            selected.parent != root
-            or re.fullmatch(r"global_step_\d+", selected.name) is None
-        ):
+        if selected.parent != root or re.fullmatch(r"global_step_\d+", selected.name) is None:
             raise ValueError(
                 "Refusing checkpoint pruning: selected checkpoint must be a direct "
                 f"global_step_<integer> child of {root}, got {selected}."
@@ -1788,10 +1827,7 @@ class RayPPOTrainer:
             if re.fullmatch(r"global_step_\d+", candidate.name) is None:
                 continue
             if candidate.is_symlink():
-                print(
-                    f"[Checkpoint pruning] leaving symlink untouched: {candidate}",
-                    flush=True,
-                )
+                print(f"[Checkpoint pruning] leaving symlink untouched: {candidate}", flush=True)
                 continue
             if not candidate.is_dir():
                 continue
@@ -2148,6 +2184,9 @@ class RayPPOTrainer:
         selection_monitor_enabled = static_monitor_enabled or turn_ppo_monitor_enabled
         selection_monitor_name = "TurnPPO" if simulated_user_turn_ppo else static_baseline_name
         selection_monitor_log_prefix = "turn_ppo" if simulated_user_turn_ppo else "static_convagent"
+        # Selection-mode runs cannot safely resume from an arbitrary later
+        # checkpoint: only the monitor-selected best is meaningful. Keeping it
+        # alone prevents FSDP optimizer shards from exhausting local storage.
         keep_only_best_checkpoint = bool(
             self.config.trainer.get("keep_only_best_checkpoint", True)
         )
@@ -2914,9 +2953,9 @@ class RayPPOTrainer:
                                     self.config.trainer.default_local_dir,
                                     selection_best_checkpoint,
                                 )
-                                metrics[
-                                    "checkpoint_pruning/removed_global_step_count"
-                                ] = float(len(removed_checkpoints))
+                                metrics["checkpoint_pruning/removed_global_step_count"] = float(
+                                    len(removed_checkpoints)
+                                )
                                 if removed_checkpoints:
                                     print(
                                         "[Checkpoint pruning] kept selected best "
@@ -2985,12 +3024,12 @@ class RayPPOTrainer:
                 n_gpus = self.resource_pool_manager.get_n_gpus()
                 metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
                 
-                # Send every update to SwanLab when enabled so its standard veRL
+                # Send every update to W&B when enabled so its standard veRL
                 # panels include actor reward/entropy/KL and critic value-loss
                 # curves, rather than only sparse checkpoint events.  Keep the
                 # console and local metric JSON cadence compact.
-                if "swanlab" in list(self.config.trainer.logger):
-                    logger.log(data=metrics, step=self.global_steps, backend=["swanlab"])
+                if "wandb" in list(self.config.trainer.logger):
+                    logger.log(data=metrics, step=self.global_steps, backend=["wandb"])
 
                 # Persist/log complete metrics at every selection validation,
                 # checkpoint, or final step.  This is deliberately independent

@@ -18,6 +18,22 @@ STATIC_ACTIONS = frozenset({"answer", "clarify", "nonanswer"})
 ANSWER_REFERENCE_SEPARATOR = "<|answer_split|>"
 
 
+def terminal_format_reward(
+    format_valid: bool,
+    *,
+    valid_reward: float,
+    invalid_reward: float,
+) -> float:
+    """Return the explicit terminal-format component for a rollout.
+
+    This is deliberately independent of ConvAgent's MIA action reward.  MIA
+    marks both a malformed completion and a format-valid but impermissible
+    action as incorrect; this small term makes the formatting distinction
+    observable to GRPO while leaving action supervision unchanged.
+    """
+    return float(valid_reward if format_valid else invalid_reward)
+
+
 def normalize_text(value: Any) -> str:
     """Lowercase text and normalize punctuation and whitespace."""
     text = "" if value is None else str(value).lower()

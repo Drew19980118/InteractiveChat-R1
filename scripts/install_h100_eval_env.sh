@@ -11,6 +11,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOCK_FILE="${REPO_ROOT}/requirements-eval-h100-cu121.txt"
 MAX_JOBS="${MAX_JOBS:-8}"
 export MAX_JOBS
+# FlashAttention's setup honours MAX_JOBS; CMake/Ninja-dependent sub-builds
+# use this matching bound as well.  Users can lower both on memory-constrained
+# hosts, but the default is intentionally parallel rather than serial.
+export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-$MAX_JOBS}"
 
 # Do not impose a machine-specific GPU list.  A caller may set
 # CUDA_VISIBLE_DEVICES before invoking the installer, otherwise the PyTorch
@@ -133,7 +137,7 @@ print(f"PyArrow: {pyarrow.__version__} (Parquet support: OK)")
 print(f"TensorDict: {tensordict.__version__}; TorchData: {torchdata.__version__}")
 PY
 
-echo "Installing Ninja before building FlashAttention (MAX_JOBS=${MAX_JOBS})..."
+echo "Installing Ninja before building FlashAttention (MAX_JOBS=${MAX_JOBS}, CMAKE_BUILD_PARALLEL_LEVEL=${CMAKE_BUILD_PARALLEL_LEVEL})..."
 # FlashAttention 2.5.8 does not publish a wheel for CPython 3.10 + PyTorch 2.4
 # + CUDA 12.1.  Install Ninja first: otherwise pip only installs it after the
 # build has started and FlashAttention falls back to slow serial distutils.

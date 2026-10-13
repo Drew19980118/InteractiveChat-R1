@@ -304,6 +304,9 @@ def main() -> None:
         # set.  Use that set for action accuracy and answer-only metrics.
         expected_actions = as_action_set(row.get("permissible_actions", row.get("expected_action")))
         predicted_action = as_text(row.get("predicted_action", "")).strip().lower()
+        sample_metadata = row.get("sample_metadata", {})
+        if not isinstance(sample_metadata, dict):
+            sample_metadata = {}
         format_valid = bool(row.get("format_valid", False)) if expected_actions else None
         action_correct = (
             bool(format_valid and predicted_action in expected_actions)
@@ -313,6 +316,12 @@ def main() -> None:
         per_sample.append(
             {
                 "sample_index": sample_index,
+                "pair_id": as_text(sample_metadata.get("pair_id", "")) or None,
+                "conversation_id": as_text(sample_metadata.get("conversation_id", "")) or None,
+                "turn_index": sample_metadata.get("turn_index"),
+                "source_turn_index": sample_metadata.get("source_turn_index"),
+                "context_variant": as_text(sample_metadata.get("context_variant", "")) or None,
+                "dependency_class": as_text(sample_metadata.get("dependency_class", "")) or None,
                 "predicted_answer": predicted_answer,
                 "terminal_predicted_answer": terminal_predicted_answer,
                 "answer_selection_source": answer_selection_source,
@@ -513,6 +522,7 @@ def main() -> None:
         "bertscore_f1": bertscore_definition,
         "ndcg_at_3": "Answer-only binary NDCG@3. TopiOCQA uses normalized exact passage-text matching because its source and retriever IDs differ; other datasets use strict passage-ID matching. Empty labels are 0.",
         "action_accuracy": "Terminal action accuracy on action-labelled datasets; static ConvAgent rows may define a set of permissible actions.",
+        "format_success_rate": "Fraction of action-labelled samples whose final terminal action uses a valid protocol format.",
     }
     if simulated_user_records:
         metric_definitions.update(
@@ -568,6 +578,11 @@ def main() -> None:
             else 0.0,
             "ndcg_at_3": fmean(record["ndcg_at_3"] for record in answer_labeled) if answer_labeled else 0.0,
             **({"action_accuracy": fmean(record["action_accuracy"] for record in action_labeled)} if action_labeled else {}),
+            **(
+                {"format_success_rate": fmean(float(record["format_valid"]) for record in action_labeled)}
+                if action_labeled
+                else {}
+            ),
             **online_metrics,
             **static_satisfaction_metrics,
         },

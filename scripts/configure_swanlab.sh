@@ -1,38 +1,29 @@
 #!/usr/bin/env bash
-# Optional SwanLab setup shared by the project training launchers.
-# The caller must set PROJECT_ROOT and activate its Python environment first.
+# SwanLab setup for the Feedback-GRPO launcher.
+# The caller must define PROJECT_ROOT and activate the training environment.
 
 configure_swanlab() {
-  SWANLAB_ENABLED="${SWANLAB_ENABLED:-true}"
-  SWANLAB_LOG_VAL_GENERATIONS="${SWANLAB_LOG_VAL_GENERATIONS:-0}"
+  SWANLAB_ENABLED="${SWANLAB_ENABLED:-false}"
   case "$SWANLAB_ENABLED" in
     true)
-      if ! [[ "$SWANLAB_LOG_VAL_GENERATIONS" =~ ^[0-9]+$ ]]; then
-        echo "ERROR: SWANLAB_LOG_VAL_GENERATIONS must be a non-negative integer." >&2
-        exit 2
-      fi
-      if ! python -c 'import swanlab; print("SwanLab SDK", swanlab.__version__)'; then
+      if ! python -c 'import swanlab; print("SwanLab SDK", getattr(swanlab, "__version__", "available"))'; then
         echo "ERROR: SwanLab is enabled but is not installed in this environment." >&2
-        echo "Install it with: python -m pip install -U swanlab" >&2
+        echo "Install it with: python -m pip install swanlab" >&2
         exit 2
       fi
-      # ``SWANLAB_PROJECT`` remains a backwards-compatible launcher input.
-      # Recent SwanLab SDK releases also parse that name as a nested Pydantic
-      # ``project`` object, where a plain project-name string fails before
-      # ``swanlab.init`` can apply its explicit argument.  Translate it to the
-      # SDK's scalar variable and remove the conflicting alias before import.
-      export SWANLAB_PROJ_NAME="${SWANLAB_PROJECT:-${SWANLAB_PROJ_NAME:-interactivechat-r1}}"
+
+      # Some SwanLab SDK releases treat SWANLAB_PROJECT as a structured
+      # settings value and fail while parsing a plain project-name string.
+      # Keep our launcher input in SWANLAB_PROJ_NAME instead.
+      export SWANLAB_PROJ_NAME="${SWANLAB_PROJ_NAME:-${SWANLAB_PROJECT:-interactivechat-r1}}"
       unset SWANLAB_PROJECT
-      export SWANLAB_GROUP="${SWANLAB_RUN_GROUP:-inscit_static_comparison}"
+      export SWANLAB_RUN_GROUP="${SWANLAB_RUN_GROUP:-inscit_feedback_grpo_3b}"
       export SWANLAB_MODE="${SWANLAB_MODE:-online}"
-      export SWANLAB_LOGDIR="${SWANLAB_LOGDIR:-$PROJECT_ROOT/swanlog}"
+      export SWANLAB_LOGDIR="${SWANLAB_LOGDIR:-${SWANLAB_LOG_DIR:-$PROJECT_ROOT/swanlog}}"
       mkdir -p "$SWANLAB_LOGDIR"
-      TRAINER_LOGGERS="['console','swanlab']"
-      echo "[SwanLab] enabled: project=$SWANLAB_PROJ_NAME group=$SWANLAB_GROUP mode=$SWANLAB_MODE logdir=$SWANLAB_LOGDIR"
-      echo "[SwanLab] validation generations/text samples per check: $SWANLAB_LOG_VAL_GENERATIONS"
+      echo "[SwanLab] enabled: project=$SWANLAB_PROJ_NAME group=$SWANLAB_RUN_GROUP mode=$SWANLAB_MODE logdir=$SWANLAB_LOGDIR"
       ;;
     false)
-      TRAINER_LOGGERS="['console']"
       ;;
     *)
       echo "ERROR: SWANLAB_ENABLED must be true or false." >&2

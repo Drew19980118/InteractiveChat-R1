@@ -1,0 +1,11 @@
+# Additional client/data dependencies for OpenAI or local-vLLM context builders.
+openai>=1.68.0,<3
+requests>=2.31.0
+pandas>=2.0.0
+pyarrow>=14.0.0
+
+# Training monitor and reporting dependencies.  These are deliberately kept
+# outside the locked CUDA runtime because they do not compile GPU extensions.
+swanlab==0.10.2
+bert-score==0.3.13
+
